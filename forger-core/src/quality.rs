@@ -65,6 +65,13 @@ pub struct QualityReport {
     pub candidates: Vec<ScoredCandidate>,
 }
 
+/// An [`AgentEvent`] from one spawned quality candidate, tagged with its index.
+#[derive(Debug, Clone)]
+pub struct QualityEvent {
+    pub candidate: usize,
+    pub event: AgentEvent,
+}
+
 pub struct QualityRunner {
     pub config: QualityConfig,
     pub reviewer: SharedProvider,
@@ -81,8 +88,9 @@ impl QualityRunner {
     /// Run `n` independent copies of `make_agent` on the same task, score, pick best.
     ///
     /// Candidates are `tokio::spawn`'d immediately so their provider calls overlap.
-    /// The factory runs on this task (to build each `Agent`); the turn itself
-    /// runs on the worker. Abort outstanding tasks if `cancel` fires while joining.
+    /// Events from those tasks are fanned in on this task via a channel (the
+    /// `Agent` sink itself is not `'static`). Abort outstanding tasks if `cancel`
+    /// fires while joining.
     pub async fn run<F, A>(
         &self,
         make_agent: F,
@@ -93,7 +101,23 @@ impl QualityRunner {
         F: Fn() -> A + Send + Sync,
         A: Agent + Send + 'static,
     {
+        self.run_with_events(make_agent, task, cancel, &mut |_| {})
+            .await
+    }
+
+    pub async fn run_with_events<F, A>(
+        &self,
+        make_agent: F,
+        task: &str,
+        cancel: CancellationToken,
+        on_event: &mut (dyn FnMut(QualityEvent) + Send),
+    ) -> Result<(Session, QualityReport), AgentError>
+    where
+        F: Fn() -> A + Send + Sync,
+        A: Agent + Send + 'static,
+    {
         let n = self.config.candidates as usize;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<QualityEvent>();
         let mut set = tokio::task::JoinSet::new();
         for i in 0..n {
             if cancel.is_cancelled() {
@@ -103,9 +127,15 @@ impl QualityRunner {
             let agent = make_agent();
             let task = task.to_string();
             let task_cancel = cancel.clone();
+            let tx = tx.clone();
             set.spawn(async move {
+                let mut sink = move |event| {
+                    let _ = tx.send(QualityEvent {
+                        candidate: i,
+                        event,
+                    });
+                };
                 let mut session = Session::new();
-                let mut sink = |_ev: AgentEvent| {};
                 let outcome = agent
                     .run_turn(
                         &mut session,
@@ -117,19 +147,36 @@ impl QualityRunner {
                 (i, session, outcome)
             });
         }
+        drop(tx);
 
         let mut raw = Vec::with_capacity(n);
-        while raw.len() < n {
+        let mut joining = true;
+        let mut events_open = true;
+        loop {
+            if !joining && !events_open {
+                break;
+            }
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
                     set.abort_all();
                     return Err(AgentError::Cancelled);
                 }
-                next = set.join_next() => {
+                ev = rx.recv(), if events_open => {
+                    match ev {
+                        Some(ev) => on_event(ev),
+                        None => events_open = false,
+                    }
+                }
+                next = set.join_next(), if joining => {
                     match next {
-                        None => break,
-                        Some(Ok(v)) => raw.push(v),
+                        None => joining = false,
+                        Some(Ok(v)) => {
+                            raw.push(v);
+                            if raw.len() >= n {
+                                joining = false;
+                            }
+                        }
                         Some(Err(e)) if e.is_cancelled() => {
                             set.abort_all();
                             return Err(AgentError::Cancelled);
@@ -233,6 +280,27 @@ pub async fn run_quality_turn(
         },
     );
     runner.run(move || agent.clone(), task, cancel).await
+}
+
+/// Like [`run_quality_turn`], but forwards each spawned candidate's events so a
+/// UI can show overlapping work instead of a silent join.
+pub async fn run_quality_turn_with_events(
+    agent: AgentLoop,
+    reviewer: SharedProvider,
+    task: &str,
+    n_candidates: u8,
+    cancel: CancellationToken,
+    on_event: &mut (dyn FnMut(QualityEvent) + Send),
+) -> Result<(Session, QualityReport), AgentError> {
+    let runner = QualityRunner::new(
+        reviewer,
+        QualityConfig {
+            candidates: n_candidates,
+        },
+    );
+    runner
+        .run_with_events(move || agent.clone(), task, cancel, on_event)
+        .await
 }
 
 fn pick_winner(scored: &[ScoredCandidate]) -> usize {

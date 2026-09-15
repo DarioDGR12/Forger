@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use forger_core::approval::AutoApprover;
 use forger_core::{
-    run_quality_turn, Agent, AgentEvent, AgentLoop, AgentLoopConfig, Approver, CancellationToken,
-    Session, SharedProvider, UserTurn,
+    run_quality_turn_with_events, Agent, AgentEvent, AgentLoop, AgentLoopConfig, Approver,
+    CancellationToken, QualityEvent, Session, SharedProvider, UserTurn,
 };
 use forger_providers::{MockProvider, OpenAiCompatConfig, OpenAiCompatProvider};
 use forger_sandbox::{FsSandbox, Sandbox};
@@ -143,8 +143,34 @@ async fn main() -> Result<()> {
         let agent = AgentLoop::new(provider.clone(), tools, approver, config);
         let cancel = CancellationToken::new();
         ctrlc_cancel(cancel.clone());
-        let (session, report) =
-            run_quality_turn(agent, provider, &task, cli.quality_n, cancel).await?;
+        let mut on_event = |ev: QualityEvent| match ev.event {
+            AgentEvent::TextDelta { text } => {
+                print!("[{}] {text}", ev.candidate);
+                let _ = io::stdout().flush();
+            }
+            AgentEvent::ToolCall { call } => {
+                eprintln!("\n[{}] → tool {} {}", ev.candidate, call.name, call.arguments)
+            }
+            AgentEvent::ToolResult { name, output, .. } => {
+                let preview: String = output.chars().take(200).collect();
+                eprintln!("[{}] ← {name}: {preview}", ev.candidate);
+            }
+            AgentEvent::Warning { message } => {
+                eprintln!("[{}] warning: {message}", ev.candidate)
+            }
+            AgentEvent::Cancelled => eprintln!("\n[{}] (cancelled)", ev.candidate),
+            _ => {}
+        };
+        let (session, report) = run_quality_turn_with_events(
+            agent,
+            provider,
+            &task,
+            cli.quality_n,
+            cancel,
+            &mut on_event,
+        )
+        .await?;
+        println!();
         println!(
             "quality: winner candidate {} / {}",
             report.winner_index, report.candidates.len()

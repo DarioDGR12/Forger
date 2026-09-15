@@ -25,7 +25,8 @@ pub use error::{AgentError, ProviderError, ToolError};
 pub use message::{FinishReason, Message, Role, StreamEvent, ToolCall};
 pub use plugin::{Plugin, PluginId, Provider, SharedProvider};
 pub use quality::{
-    run_quality_turn, QualityConfig, QualityReport, QualityRunner, ScoredCandidate,
+    run_quality_turn, run_quality_turn_with_events, QualityConfig, QualityEvent, QualityReport,
+    QualityRunner, ScoredCandidate,
 };
 pub use session::Session;
 pub use tool::{required_path, Tool, ToolContext, ToolRegistry, ToolSpec};

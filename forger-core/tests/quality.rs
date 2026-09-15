@@ -234,3 +234,42 @@ async fn quality_cancel_aborts_in_flight_candidates() {
         "cancel should abort spawned candidates, took {elapsed:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quality_fans_in_events_from_spawned_candidates() {
+    use forger_core::{run_quality_turn_with_events, AgentEvent, QualityEvent};
+    use std::collections::HashSet;
+
+    let shared = SlowShared::new(std::time::Duration::from_millis(1));
+    let reviewer = ScriptedProvider::new(vec![
+        text("{\"score\": 5, \"rationale\": \"ok\"}"),
+        text("{\"score\": 6, \"rationale\": \"ok\"}"),
+    ]);
+    let agent = AgentLoop::new(
+        Arc::clone(&shared) as forger_core::SharedProvider,
+        ToolRegistry::new(),
+        Arc::new(AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        }),
+        AgentLoopConfig::default(),
+    );
+    let mut finished = HashSet::new();
+    let mut on_event = |ev: QualityEvent| {
+        if matches!(ev.event, AgentEvent::Finished { .. }) {
+            finished.insert(ev.candidate);
+        }
+    };
+    let (_session, report) = run_quality_turn_with_events(
+        agent,
+        reviewer,
+        "task",
+        2,
+        CancellationToken::new(),
+        &mut on_event,
+    )
+    .await
+    .unwrap();
+    assert_eq!(finished, HashSet::from([0, 1]));
+    assert_eq!(report.candidates.len(), 2);
+}
