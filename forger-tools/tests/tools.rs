@@ -1,6 +1,6 @@
 use forger_core::{Tool, ToolContext, ToolError};
 use forger_sandbox::{FsSandbox, Sandbox};
-use forger_tools::{EditFile, Grep, ListDir, ReadFile, RunCommand, WriteFile};
+use forger_tools::{EditFile, Grep, ListDir, ReadFile, RenameFile, RunCommand, WriteFile};
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -94,7 +94,10 @@ async fn grep_finds_source_but_not_env() {
     let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
     let grep = Grep::new(sb);
     let out = grep
-        .execute(json!({"pattern": "secret", "glob": "*.rs"}), &ctx(dir.path(), false))
+        .execute(
+            json!({"pattern": "secret", "glob": "*.rs"}),
+            &ctx(dir.path(), false),
+        )
         .await
         .unwrap();
     assert!(out.contains("app.rs"));
@@ -106,7 +109,10 @@ async fn edit_file_replaces_unique_snippet() {
     let dir = tempdir().unwrap();
     let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
     WriteFile::new(sb.clone())
-        .execute(json!({"path":"a.rs","contents":"fn a() {}\nfn b() {}\n"}), &ctx(dir.path(), false))
+        .execute(
+            json!({"path":"a.rs","contents":"fn a() {}\nfn b() {}\n"}),
+            &ctx(dir.path(), false),
+        )
         .await
         .unwrap();
     let edit = EditFile::new(sb.clone());
@@ -128,7 +134,10 @@ async fn edit_file_refuses_ambiguous_replace() {
     let dir = tempdir().unwrap();
     let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
     WriteFile::new(sb.clone())
-        .execute(json!({"path":"a.rs","contents":"x\nx\n"}), &ctx(dir.path(), false))
+        .execute(
+            json!({"path":"a.rs","contents":"x\nx\n"}),
+            &ctx(dir.path(), false),
+        )
         .await
         .unwrap();
     let err = EditFile::new(sb)
@@ -139,4 +148,53 @@ async fn edit_file_refuses_ambiguous_replace() {
         .await
         .unwrap_err();
     assert!(matches!(err, ToolError::Failed { .. }));
+}
+
+#[tokio::test]
+async fn rename_file_config_to_env_is_denied() {
+    let dir = tempdir().unwrap();
+    let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
+    WriteFile::new(sb.clone())
+        .execute(
+            json!({"path":"config","contents":"SECRET=1"}),
+            &ctx(dir.path(), false),
+        )
+        .await
+        .unwrap();
+    let err = RenameFile::new(sb)
+        .execute(
+            json!({"from":"config","to":".env"}),
+            &ctx(dir.path(), false),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ToolError::Denied { .. }));
+    assert!(dir.path().join("config").exists());
+    assert!(!dir.path().join(".env").exists());
+}
+
+#[tokio::test]
+async fn rename_file_innocent_roundtrip() {
+    let dir = tempdir().unwrap();
+    let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
+    WriteFile::new(sb.clone())
+        .execute(
+            json!({"path":"a.txt","contents":"hi"}),
+            &ctx(dir.path(), false),
+        )
+        .await
+        .unwrap();
+    RenameFile::new(sb.clone())
+        .execute(
+            json!({"from":"a.txt","to":"b.txt"}),
+            &ctx(dir.path(), false),
+        )
+        .await
+        .unwrap();
+    let got = ReadFile::new(sb)
+        .execute(json!({"path":"b.txt"}), &ctx(dir.path(), false))
+        .await
+        .unwrap();
+    assert_eq!(got, "hi");
+    assert!(!dir.path().join("a.txt").exists());
 }

@@ -5,6 +5,7 @@ mod edit_file;
 mod grep;
 mod list_dir;
 mod read_file;
+mod rename_file;
 mod run_command;
 mod write_file;
 
@@ -12,6 +13,7 @@ pub use edit_file::EditFile;
 pub use grep::Grep;
 pub use list_dir::ListDir;
 pub use read_file::ReadFile;
+pub use rename_file::RenameFile;
 pub use run_command::RunCommand;
 pub use write_file::WriteFile;
 
@@ -27,6 +29,7 @@ pub fn stock_tools(sandbox: Arc<dyn Sandbox>, run_timeout: Duration) -> ToolRegi
     reg.register(Arc::new(Grep::new(sandbox.clone())));
     reg.register(Arc::new(EditFile::new(sandbox.clone())));
     reg.register(Arc::new(WriteFile::new(sandbox.clone())));
+    reg.register(Arc::new(RenameFile::new(sandbox.clone())));
     reg.register(Arc::new(RunCommand::new(sandbox, run_timeout)));
     reg
 }

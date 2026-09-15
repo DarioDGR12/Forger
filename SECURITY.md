@@ -14,15 +14,23 @@ generic "sensitive tool" confirmation:
 - The sandbox still re-checks the resolved path and the override must match
   that path, so approving `.env` does not authorize a different target.
 
-`write_file` resolves symlinks and `..` **before** the denylist check, so
-`innocent → .env` is treated as `.env`.
+`write_file`, `rename_file`, and `Sandbox::rename` resolve the parent with
+`std::fs::canonicalize`, join the file name, and run the denylist on that
+final path (and on a full canonicalize if the target already exists). So
+`write("config")` then `rename(".env")` is blocked, as is `.env` → `config`
+(secrets cannot be smuggled out under an innocent name).
 
-### Accepted gap: shell rename
+After `run_command`, the workspace is re-scanned. Newly created denylist
+files (the `mv config .env` case) are deleted. Existing denylist files
+that the shell mutated (`echo >> .env`, `mv -f`) are restored from a
+pre-command backup (files up to 1 MiB). `.git` is skipped so `git init`
+still works.
 
-A `run_command` can `echo SECRET > tmp && mv tmp .env`. Filename policy on
-`write_file` cannot see that. Closing it fully means intercepting the final
-path of every filesystem mutation inside the sandbox (Landlock is an
-allowlist of trees, not a filename denylist). Documented, not hidden.
+### Residual
+
+`.git` contents via the shell, denylist files larger than 1 MiB, and
+TOCTOU between the post-command scan and the next tool call. Landlock
+still cannot denylist by filename. Documented, not hidden.
 
 ## Landlock `SCOPE_SIGNAL` (Linux < 6.12)
 
