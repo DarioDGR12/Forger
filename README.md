@@ -42,11 +42,21 @@ cargo run -p forger-cli -- serve --port 7420
 `--quality` corre 2 candidatos en paralelo (máximo 3) y un revisor los
 puntúa 0–10. El merge es "el mejor completo", no un merge de diffs.
 
+Config opcional: copia [`forger.toml.example`](forger.toml.example) a
+`forger.toml` o `~/.config/forger/config.toml` (`provider`, `model`,
+`base_url`). Las API keys **solo** salen del entorno. Las sesiones se
+guardan en `.forger/sessions/` y se retoman con `--resume <uuid>`.
+
+Sin API key, `--provider mock` (el default) corre un explorer mínimo que
+llama a `list_dir` y resume el listado. `forger serve` usa el mismo explorer
+y guarda las sesiones en `.forger/sessions/` (la UI tiene un campo Resume).
+
 ## Decisiones que no se reabren a la ligera
 
 - Denylist de secretos: no negociable por default; dos capas independientes.
 - `forger serve` en loopback, sin autenticación. Auth de verdad o nada.
-- Riesgos aceptados y documentados en [`SECURITY.md`](SECURITY.md)
-  (rename vía shell, Landlock `SCOPE_SIGNAL` en kernels < 6.12).
+- Riesgos residuales documentados en [`SECURITY.md`](SECURITY.md)
+  (`.git` vía shell, denylist > 1 MiB, Landlock `SCOPE_SIGNAL` en kernels < 6.12).
+- Las API keys no se leen de `forger.toml`.
 
 Apache-2.0. See [`LICENSE`](LICENSE).

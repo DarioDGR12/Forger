@@ -32,10 +32,7 @@ impl Tool for ListDir {
     }
 
     async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<String, ToolError> {
-        let path = args
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or(".");
+        let path = args.get("path").and_then(Value::as_str).unwrap_or(".");
         let path = PathBuf::from(path);
         let decision = self
             .sandbox

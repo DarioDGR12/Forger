@@ -66,7 +66,11 @@ impl Message {
         }
     }
 
-    pub fn tool_result(tool_call_id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn tool_result(
+        tool_call_id: impl Into<String>,
+        name: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
         Self {
             role: Role::Tool,
             content: content.into(),
@@ -107,12 +111,16 @@ pub enum FinishReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    TextDelta { text: String },
+    TextDelta {
+        text: String,
+    },
     ToolCallDelta {
         index: usize,
         id: Option<String>,
         name: Option<String>,
         arguments: Option<String>,
     },
-    Finished { reason: FinishReason },
+    Finished {
+        reason: FinishReason,
+    },
 }

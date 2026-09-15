@@ -12,6 +12,7 @@ description = "Stock tools: read_file, write_file, edit_file, list_dir, grep, ru
 async-trait.workspace = true
 forger-core.workspace = true
 forger-sandbox.workspace = true
+ignore = "0.4"
 regex = "1"
 serde.workspace = true
 serde_json.workspace = true

@@ -48,3 +48,8 @@ runs commands as you).
 We will **not** add a decorative bearer token. Authentication is either a
 real session (token/cookie) or it stays unimplemented. The CLI refuses
 non-loopback `--bind`.
+
+## Config files
+
+`forger.toml` may set `provider`, `model`, and `base_url`. It does **not**
+load API keys. Put keys in the environment (`FORGER_API_KEY`).

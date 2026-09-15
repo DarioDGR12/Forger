@@ -22,8 +22,8 @@ impl OpenAiCompatConfig {
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
             .ok()?;
-        let base_url =
-            std::env::var("FORGER_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
+        let base_url = std::env::var("FORGER_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
         let model = std::env::var("FORGER_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
         Some(Self {
             base_url,
@@ -102,9 +102,9 @@ impl Provider for OpenAiCompatProvider {
             return Err(ProviderError::Transport(format!("HTTP {status}: {text}")));
         }
 
-        let byte_stream = response.bytes_stream().map(|r| {
-            r.map_err(|e| ProviderError::Transport(e.to_string()))
-        });
+        let byte_stream = response
+            .bytes_stream()
+            .map(|r| r.map_err(|e| ProviderError::Transport(e.to_string())));
         Ok(sse_to_events(byte_stream, cancel))
     }
 }
@@ -336,7 +336,9 @@ mod tests {
         let frame = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#;
         let ev = parse_sse_frame(frame);
         match &ev[0] {
-            Ok(StreamEvent::ToolCallDelta { name, arguments, .. }) => {
+            Ok(StreamEvent::ToolCallDelta {
+                name, arguments, ..
+            }) => {
                 assert_eq!(name.as_deref(), Some("read_file"));
                 assert_eq!(arguments.as_deref(), Some("{}"));
             }

@@ -44,6 +44,17 @@ impl Default for AgentLoopConfig {
     }
 }
 
+impl AgentLoopConfig {
+    pub fn for_workspace(workspace: PathBuf) -> Self {
+        let mut cfg = Self {
+            workspace: workspace.clone(),
+            ..Self::default()
+        };
+        cfg.system_prompt = format!("{}\nWorkspace: {}", cfg.system_prompt, workspace.display());
+        cfg
+    }
+}
+
 pub struct AgentLoop {
     provider: Arc<dyn Provider>,
     tools: ToolRegistry,

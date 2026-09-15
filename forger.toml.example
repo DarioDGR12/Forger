@@ -1,0 +1,9 @@
+# Copy to forger.toml in the workspace (or ~/.config/forger/config.toml).
+# Flags and environment variables override this file.
+#
+# API keys are NOT loaded from this file. Set FORGER_API_KEY (or OPENAI_API_KEY /
+# DEEPSEEK_API_KEY) in the environment.
+
+provider = "openai-compat"
+model = "deepseek-chat"
+base_url = "https://api.deepseek.com/v1"

@@ -14,7 +14,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
 
+mod config;
 mod interactive;
+mod session_store;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -56,6 +58,10 @@ struct Cli {
     #[arg(long, default_value_t = 2)]
     quality_n: u8,
 
+    /// Resume a session UUID stored under .forger/sessions/
+    #[arg(long)]
+    resume: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -87,6 +93,17 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let file_cfg = config::FileConfig::load(&cli.workspace)?;
+    let workspace_arg = file_cfg
+        .workspace
+        .clone()
+        .unwrap_or_else(|| cli.workspace.clone());
+    let workspace = std::fs::canonicalize(&workspace_arg)
+        .or_else(|_| {
+            std::fs::create_dir_all(&workspace_arg)?;
+            std::fs::canonicalize(&workspace_arg)
+        })
+        .with_context(|| format!("workspace {}", workspace_arg.display()))?;
 
     if let Some(Commands::Serve { port, bind }) = cli.command {
         if !is_loopback(&bind) {
@@ -98,15 +115,8 @@ async fn main() -> Result<()> {
             );
         }
         let addr: std::net::SocketAddr = format!("{bind}:{port}").parse()?;
-        return forger_server::run(addr, cli.workspace).await;
+        return forger_server::run(addr, workspace).await;
     }
-
-    let workspace = std::fs::canonicalize(&cli.workspace)
-        .or_else(|_| {
-            std::fs::create_dir_all(&cli.workspace)?;
-            std::fs::canonicalize(&cli.workspace)
-        })
-        .with_context(|| format!("workspace {}", cli.workspace.display()))?;
 
     let sandbox = Arc::new(FsSandbox::new(&workspace)?);
     if let Some(w) = sandbox.landlock_warning() {
@@ -114,7 +124,16 @@ async fn main() -> Result<()> {
     }
 
     let tools = stock_tools(sandbox.clone(), Duration::from_secs(30));
-    let provider = build_provider(cli.provider, cli.model, cli.base_url)?;
+    let provider_kind = cli.provider.or(match file_cfg.provider.as_deref() {
+        Some("mock") => Some(ProviderKind::Mock),
+        Some("openai-compat") | Some("openai_compat") => Some(ProviderKind::OpenaiCompat),
+        _ => None,
+    });
+    let provider = build_provider(
+        provider_kind,
+        cli.model.or(file_cfg.model.clone()),
+        cli.base_url.or(file_cfg.base_url.clone()),
+    )?;
     let approver: Arc<dyn Approver> = if cli.message.is_some() {
         Arc::new(AutoApprover {
             allow_sensitive: cli.yes,
@@ -127,9 +146,12 @@ async fn main() -> Result<()> {
         })
     };
 
-    let config = AgentLoopConfig {
-        workspace: workspace.clone(),
-        ..AgentLoopConfig::default()
+    let loop_cfg = AgentLoopConfig::for_workspace(workspace.clone());
+
+    let mut session = if let Some(id) = &cli.resume {
+        session_store::load(&workspace, id)?
+    } else {
+        Session::new()
     };
 
     if cli.quality {
@@ -147,16 +169,29 @@ async fn main() -> Result<()> {
             let provider = provider.clone();
             let tools = tools.clone();
             let approver = approver.clone();
-            let config = config.clone();
-            move || AgentLoop::new(provider.clone(), tools.clone(), approver.clone(), config.clone())
+            let config = loop_cfg.clone();
+            move || {
+                AgentLoop::new(
+                    provider.clone(),
+                    tools.clone(),
+                    approver.clone(),
+                    config.clone(),
+                )
+            }
         };
         let runner = QualityRunner::new(provider, qcfg);
         let cancel = CancellationToken::new();
         ctrlc_cancel(cancel.clone());
         let (session, report) = runner.run(make, &task, cancel).await?;
+        if let Err(e) = session_store::save(&workspace, &session) {
+            eprintln!("warning: could not save session: {e}");
+        } else {
+            eprintln!("saved session {}", session.id);
+        }
         println!(
             "quality: winner candidate {} / {}",
-            report.winner_index, report.candidates.len()
+            report.winner_index,
+            report.candidates.len()
         );
         for c in &report.candidates {
             println!("  [{}] score {} — {}", c.index, c.score, c.rationale);
@@ -168,8 +203,7 @@ async fn main() -> Result<()> {
     }
 
     if let Some(msg) = cli.message {
-        let agent = AgentLoop::new(provider, tools, approver, config);
-        let mut session = Session::new();
+        let agent = AgentLoop::new(provider, tools, approver, loop_cfg);
         let cancel = CancellationToken::new();
         ctrlc_cancel(cancel.clone());
         let mut sink = |ev: AgentEvent| match ev {
@@ -187,18 +221,18 @@ async fn main() -> Result<()> {
             _ => {}
         };
         agent
-            .run_turn(
-                &mut session,
-                UserTurn { text: msg },
-                cancel,
-                &mut sink,
-            )
+            .run_turn(&mut session, UserTurn { text: msg }, cancel, &mut sink)
             .await?;
+        if let Err(e) = session_store::save(&workspace, &session) {
+            eprintln!("warning: could not save session: {e}");
+        } else {
+            eprintln!("saved session {}", session.id);
+        }
         println!();
         return Ok(());
     }
 
-    interactive::repl(provider, tools, approver, config).await
+    interactive::repl(provider, tools, approver, loop_cfg, workspace, session).await
 }
 
 fn is_loopback(bind: &str) -> bool {
@@ -218,9 +252,10 @@ fn build_provider(
         }
     });
     match kind {
-        ProviderKind::Mock => Ok(Arc::new(MockProvider::single_text(
-            "MockProvider: set FORGER_API_KEY to use an OpenAI-compatible backend.",
-        ))),
+        ProviderKind::Mock => {
+            eprintln!("using MockProvider explorer (set FORGER_API_KEY for a real model)");
+            Ok(Arc::new(MockProvider::explorer()))
+        }
         ProviderKind::OpenaiCompat => {
             let mut cfg = OpenAiCompatConfig::from_env().context(
                 "openai-compat requires FORGER_API_KEY (or OPENAI_API_KEY / DEEPSEEK_API_KEY)",

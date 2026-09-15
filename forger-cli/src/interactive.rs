@@ -5,7 +5,10 @@ use forger_core::{
     CancellationToken, Decision, Provider, Session, ToolRegistry, UserTurn,
 };
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
+
+use crate::session_store;
 
 pub struct PromptApprover {
     pub auto_sensitive: bool,
@@ -72,15 +75,16 @@ pub async fn repl(
     tools: ToolRegistry,
     approver: Arc<dyn Approver>,
     config: AgentLoopConfig,
+    workspace: PathBuf,
+    mut session: Session,
 ) -> Result<()> {
     let agent = AgentLoop::new(provider, tools, approver, config);
-    let mut session = Session::new();
     println!(
         "Forger 0.1 — session {}. Ctrl+C cancels a turn; /quit exits.",
         session.id
     );
-    println!("Commands: /quit  /reset  /help");
-    println!("(no API key → MockProvider. Set FORGER_API_KEY for openai-compat.)");
+    println!("Commands: /quit  /reset  /id  /help");
+    println!("Sessions auto-save under .forger/sessions/. Set FORGER_API_KEY for openai-compat.");
 
     let stdin = io::stdin();
     loop {
@@ -102,8 +106,13 @@ pub async fn repl(
                 println!("new session {}", session.id);
                 continue;
             }
+            "/id" => {
+                println!("{}", session.id);
+                continue;
+            }
             "/help" => {
-                println!("Type a task. /reset starts a new session. /quit exits.");
+                println!("Type a task. /reset starts a new session. /id prints the UUID.");
+                println!("Turns are saved to .forger/sessions/<id>.json (resume with --resume).");
                 println!("Ctrl+C during a turn cancels without corrupting the session.");
                 continue;
             }
@@ -145,8 +154,16 @@ pub async fn repl(
             )
             .await
         {
-            Ok(_) => println!(),
-            Err(e) => eprintln!("\nerror: {e}"),
+            Ok(_) => {
+                println!();
+                if let Err(e) = session_store::save(&workspace, &session) {
+                    eprintln!("warning: could not save session: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("\nerror: {e}");
+                let _ = session_store::save(&workspace, &session);
+            }
         }
         ctrlc.abort();
     }

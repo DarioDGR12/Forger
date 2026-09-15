@@ -25,7 +25,7 @@ pub use error::{AgentError, ProviderError, ToolError};
 pub use message::{FinishReason, Message, Role, StreamEvent, ToolCall};
 pub use plugin::{Plugin, PluginId, Provider};
 pub use quality::{QualityConfig, QualityReport, QualityRunner, ScoredCandidate};
-pub use session::Session;
+pub use session::{sessions_dir, Session, SessionIoError};
 pub use tool::{required_path, Tool, ToolContext, ToolRegistry, ToolSpec};
 
 pub use tokio_util::sync::CancellationToken;

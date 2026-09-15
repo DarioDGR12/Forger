@@ -105,6 +105,25 @@ async fn grep_finds_source_but_not_env() {
 }
 
 #[tokio::test]
+async fn grep_respects_gitignore() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+    std::fs::write(dir.path().join("kept.rs"), "needle here\n").unwrap();
+    std::fs::write(dir.path().join("ignored.rs"), "needle here\n").unwrap();
+    let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
+    let grep = Grep::new(sb);
+    let out = grep
+        .execute(
+            json!({"pattern": "needle", "glob": "*.rs"}),
+            &ctx(dir.path(), false),
+        )
+        .await
+        .unwrap();
+    assert!(out.contains("kept.rs"));
+    assert!(!out.contains("ignored.rs"));
+}
+
+#[tokio::test]
 async fn edit_file_replaces_unique_snippet() {
     let dir = tempdir().unwrap();
     let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());

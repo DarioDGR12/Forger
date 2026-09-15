@@ -6,6 +6,7 @@
 
 use anyhow::{bail, Result};
 use axum::extract::State;
+use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse};
 use axum::routing::{get, post};
@@ -96,19 +97,42 @@ async fn new_session(
     Json(body): Json<NewSessionBody>,
 ) -> impl IntoResponse {
     if let Some(id) = body.resume {
-        Json(serde_json::json!({"id": id}))
-    } else {
-        let s = Session::new();
-        let id = s.id.to_string();
-        state.sessions.lock().await.insert(
-            id.clone(),
-            SessionSlot {
-                session: s,
-                busy: false,
-            },
-        );
-        Json(serde_json::json!({"id": id}))
+        return match Session::load_str(&state.workspace, &id) {
+            Ok(s) => {
+                let sid = s.id.to_string();
+                state.sessions.lock().await.insert(
+                    sid.clone(),
+                    SessionSlot {
+                        session: s,
+                        busy: false,
+                    },
+                );
+                Json(serde_json::json!({"id": sid})).into_response()
+            }
+            Err(e) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": e.to_string()})),
+            )
+                .into_response(),
+        };
     }
+    let s = Session::new();
+    let id = s.id.to_string();
+    if let Err(e) = s.save(&state.workspace) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("could not persist session: {e}")})),
+        )
+            .into_response();
+    }
+    state.sessions.lock().await.insert(
+        id.clone(),
+        SessionSlot {
+            session: s,
+            busy: false,
+        },
+    );
+    Json(serde_json::json!({"id": id})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -133,16 +157,18 @@ async fn turn_sse(
     tokio::spawn(async move {
         let result = run_one_turn(workspace, sessions, body, tx.clone(), cancel_task).await;
         if let Err(e) = result {
-            let _ = tx.send(serde_json::json!({"type":"error","message": e.to_string()}).to_string());
+            let _ =
+                tx.send(serde_json::json!({"type":"error","message": e.to_string()}).to_string());
         }
         let _ = tx.send(serde_json::json!({"type":"done"}).to_string());
     });
 
-    let stream = futures::stream::unfold((rx, CancelOnDrop(cancel)), |(mut rx, guard)| async move {
-        rx.recv()
-            .await
-            .map(|data| (Ok(Event::default().data(data)), (rx, guard)))
-    });
+    let stream =
+        futures::stream::unfold((rx, CancelOnDrop(cancel)), |(mut rx, guard)| async move {
+            rx.recv()
+                .await
+                .map(|data| (Ok(Event::default().data(data)), (rx, guard)))
+        });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -154,10 +180,17 @@ async fn run_one_turn(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut map = sessions.lock().await;
-    let slot = map.entry(body.session_id.clone()).or_insert_with(|| SessionSlot {
-        session: Session::new(),
-        busy: false,
-    });
+    if !map.contains_key(&body.session_id) {
+        let session = Session::load_or_create(&workspace, &body.session_id)?;
+        map.insert(
+            body.session_id.clone(),
+            SessionSlot {
+                session,
+                busy: false,
+            },
+        );
+    }
+    let slot = map.get_mut(&body.session_id).expect("session slot present");
     if slot.busy {
         drop(map);
         anyhow::bail!("session {} is already running a turn", body.session_id);
@@ -167,6 +200,13 @@ async fn run_one_turn(
     drop(map);
 
     let result = execute_turn(&workspace, &body, &tx, cancel, &mut local).await;
+    if let Err(e) = local.save(&workspace) {
+        tracing::warn!("could not persist session {}: {e}", body.session_id);
+        let _ = tx.send(
+            serde_json::json!({"type":"warning","message": format!("could not persist session: {e}")})
+                .to_string(),
+        );
+    }
 
     let mut map = sessions.lock().await;
     if let Some(slot) = map.get_mut(&body.session_id) {
@@ -190,9 +230,7 @@ async fn execute_turn(
     let tools = stock_tools(sandbox, Duration::from_secs(30));
     let provider: Arc<dyn forger_core::Provider> = match OpenAiCompatConfig::from_env() {
         Some(cfg) => Arc::new(OpenAiCompatProvider::new(cfg)),
-        None => Arc::new(MockProvider::single_text(
-            "MockProvider: set FORGER_API_KEY for a real model.",
-        )),
+        None => Arc::new(MockProvider::explorer()),
     };
     let approver = Arc::new(AutoApprover {
         allow_sensitive: body.yes,
@@ -202,10 +240,7 @@ async fn execute_turn(
         provider,
         tools,
         approver,
-        AgentLoopConfig {
-            workspace: workspace.to_path_buf(),
-            ..AgentLoopConfig::default()
-        },
+        AgentLoopConfig::for_workspace(workspace.to_path_buf()),
     );
 
     let mut sink = |ev: AgentEvent| {
@@ -240,6 +275,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
 <p class="warn">This UI is loopback-only and has <strong>no authentication</strong>.
 Do not expose the port. Auth will be a real session, or nothing.</p>
 <p id="sid"></p>
+<p>
+  <input id="resume" placeholder="resume session UUID" size="36">
+  <button id="load" type="button">Resume</button>
+</p>
 <textarea id="msg" placeholder="Ask Forger to do something in the workspace…"></textarea><br>
 <label><input type="checkbox" id="yes"> --yes (sensitive tools)</label>
 <label><input type="checkbox" id="deny"> --allow-denied-paths (separate denylist override)</label><br>
@@ -250,12 +289,29 @@ Do not expose the port. Auth will be a real session, or nothing.</p>
 let sessionId = null;
 let inflight = null;
 const log = (t) => { document.getElementById('log').textContent += t; };
+const setSid = (id) => {
+  sessionId = id;
+  document.getElementById('sid').textContent = 'session ' + sessionId;
+};
 const setBusy = (b) => {
   document.getElementById('send').disabled = b;
   document.getElementById('cancel').disabled = !b;
 };
 fetch('/v1/session', {method:'POST', headers:{'content-type':'application/json'}, body:'{}'})
-  .then(r => r.json()).then(j => { sessionId = j.id; document.getElementById('sid').textContent = 'session ' + sessionId; });
+  .then(r => r.json()).then(j => setSid(j.id));
+document.getElementById('load').onclick = async () => {
+  const id = document.getElementById('resume').value.trim();
+  if (!id) return;
+  const res = await fetch('/v1/session', {
+    method:'POST',
+    headers:{'content-type':'application/json'},
+    body: JSON.stringify({resume: id})
+  });
+  const j = await res.json();
+  if (!res.ok) { log('\n[error] ' + (j.error || res.status) + '\n'); return; }
+  setSid(j.id);
+  log('\n(resumed ' + j.id + ')\n');
+};
 document.getElementById('cancel').onclick = () => { if (inflight) inflight.abort(); };
 document.getElementById('send').onclick = async () => {
   const message = document.getElementById('msg').value;
@@ -288,6 +344,7 @@ document.getElementById('send').onclick = async () => {
           const ev = JSON.parse(line);
           if (ev.type === 'text_delta') log(ev.text || '');
           else if (ev.type === 'tool_call') log('\n→ ' + (ev.call && ev.call.name) + '\n');
+          else if (ev.type === 'tool_result') log('← ' + (ev.name || '') + '\n');
           else if (ev.type === 'cancelled') log('\n(cancelled)\n');
           else if (ev.type === 'warning' || ev.type === 'error') log('\n[' + ev.type + '] ' + (ev.message || '') + '\n');
         } catch (e) { log(line); }
@@ -338,7 +395,12 @@ mod tests {
         let (_dir, state) = test_harness();
         let app = app(state);
         let res = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -384,9 +446,64 @@ mod tests {
         let body = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
             .unwrap();
         assert!(
-            body.contains("text_delta") || body.contains("MockProvider"),
+            body.contains("text_delta") || body.contains("Mock") || body.contains("tool_call"),
             "unexpected SSE body: {body}"
         );
+        let persisted = _dir
+            .path()
+            .join(".forger")
+            .join("sessions")
+            .join(format!("{id}.json"));
+        assert!(
+            persisted.is_file(),
+            "turn must persist {}",
+            persisted.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_missing_session_is_404() {
+        let (_dir, state) = test_harness();
+        let app = app(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"resume":"00000000-0000-0000-0000-000000000000"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resume_loads_persisted_session() {
+        let (dir, state) = test_harness();
+        let mut s = Session::new();
+        s.push(forger_core::Message::user("remembered"));
+        s.save(dir.path()).unwrap();
+        let id = s.id.to_string();
+        let app = app(state);
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/session")
+                    .header("content-type", "application/json")
+                    .body(Body::from(format!(r#"{{"resume":"{id}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["id"].as_str(), Some(id.as_str()));
     }
 
     #[tokio::test]
