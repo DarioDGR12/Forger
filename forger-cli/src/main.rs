@@ -49,6 +49,10 @@ struct Cli {
     #[arg(long)]
     base_url: Option<String>,
 
+    /// openai-compat only. `required` forces DeepSeek/OpenAI to emit tool_calls.
+    #[arg(long, value_enum)]
+    tool_choice: Option<ToolChoiceArg>,
+
     /// Run 2–3 candidate loops and pick the best (token cost scales with N; default N=2)
     #[arg(long)]
     quality: bool,
@@ -77,6 +81,23 @@ enum Commands {
 enum ProviderKind {
     Mock,
     OpenaiCompat,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum ToolChoiceArg {
+    Auto,
+    Required,
+    None,
+}
+
+impl From<ToolChoiceArg> for forger_providers::ToolChoice {
+    fn from(value: ToolChoiceArg) -> Self {
+        match value {
+            ToolChoiceArg::Auto => Self::Auto,
+            ToolChoiceArg::Required => Self::Required,
+            ToolChoiceArg::None => Self::None,
+        }
+    }
 }
 
 #[tokio::main]
@@ -114,7 +135,7 @@ async fn main() -> Result<()> {
     }
 
     let tools = stock_tools(sandbox.clone(), Duration::from_secs(30));
-    let provider = build_provider(cli.provider, cli.model, cli.base_url)?;
+    let provider = build_provider(cli.provider, cli.model, cli.base_url, cli.tool_choice)?;
     let approver: Arc<dyn Approver> = if cli.message.is_some() {
         Arc::new(AutoApprover {
             allow_sensitive: cli.yes,
@@ -148,7 +169,14 @@ async fn main() -> Result<()> {
             let tools = tools.clone();
             let approver = approver.clone();
             let config = config.clone();
-            move || AgentLoop::new(provider.clone(), tools.clone(), approver.clone(), config.clone())
+            move || {
+                AgentLoop::new(
+                    provider.clone(),
+                    tools.clone(),
+                    approver.clone(),
+                    config.clone(),
+                )
+            }
         };
         let runner = QualityRunner::new(provider, qcfg);
         let cancel = CancellationToken::new();
@@ -156,7 +184,8 @@ async fn main() -> Result<()> {
         let (session, report) = runner.run(make, &task, cancel).await?;
         println!(
             "quality: winner candidate {} / {}",
-            report.winner_index, report.candidates.len()
+            report.winner_index,
+            report.candidates.len()
         );
         for c in &report.candidates {
             println!("  [{}] score {} — {}", c.index, c.score, c.rationale);
@@ -187,12 +216,7 @@ async fn main() -> Result<()> {
             _ => {}
         };
         agent
-            .run_turn(
-                &mut session,
-                UserTurn { text: msg },
-                cancel,
-                &mut sink,
-            )
+            .run_turn(&mut session, UserTurn { text: msg }, cancel, &mut sink)
             .await?;
         println!();
         return Ok(());
@@ -209,6 +233,7 @@ fn build_provider(
     kind: Option<ProviderKind>,
     model: Option<String>,
     base_url: Option<String>,
+    tool_choice: Option<ToolChoiceArg>,
 ) -> Result<Arc<dyn forger_core::Provider>> {
     let kind = kind.unwrap_or_else(|| {
         if OpenAiCompatConfig::from_env().is_some() {
@@ -230,6 +255,9 @@ fn build_provider(
             }
             if let Some(u) = base_url {
                 cfg.base_url = u;
+            }
+            if let Some(tc) = tool_choice {
+                cfg.tool_choice = tc.into();
             }
             Ok(Arc::new(OpenAiCompatProvider::new(cfg)))
         }

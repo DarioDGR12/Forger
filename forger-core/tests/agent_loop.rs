@@ -256,6 +256,68 @@ async fn malformed_tool_call_does_not_panic_and_continues() {
 }
 
 #[tokio::test]
+async fn assembles_fragmented_parallel_tool_calls_by_index() {
+    let fragments = vec![
+        Ok(StreamEvent::ToolCallDelta {
+            index: 1,
+            id: Some("c1".into()),
+            name: Some("echo".into()),
+            arguments: Some(r#"{"text":""#.into()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: Some("c0".into()),
+            name: Some("ec".into()),
+            arguments: Some(r#"{"text":"hel"#.into()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 0,
+            id: None,
+            name: Some("ho".into()),
+            arguments: Some(r#"lo"}"#.into()),
+        }),
+        Ok(StreamEvent::ToolCallDelta {
+            index: 1,
+            id: None,
+            name: None,
+            arguments: Some(r#"world"}"#.into()),
+        }),
+        Ok(StreamEvent::Finished {
+            reason: FinishReason::ToolCalls,
+        }),
+    ];
+    let provider = ScriptedProvider::new(vec![fragments, text_then("done")]);
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let agent = loop_with(provider, tools, AutoApprover {
+        allow_sensitive: true,
+        allow_denylist: false,
+    });
+    let mut session = Session::new();
+    run(&agent, &mut session, "call both").await.unwrap();
+    let assistant = session
+        .messages()
+        .iter()
+        .find(|m| m.role == Role::Assistant && m.has_tool_calls())
+        .expect("assistant tool calls");
+    let calls = assistant.tool_calls.as_ref().unwrap();
+    assert_eq!(calls[0].id, "c0");
+    assert_eq!(calls[0].name, "echo");
+    assert_eq!(calls[0].arguments, r#"{"text":"hello"}"#);
+    assert_eq!(calls[1].id, "c1");
+    assert_eq!(calls[1].name, "echo");
+    assert_eq!(calls[1].arguments, r#"{"text":"world"}"#);
+    let results: Vec<&str> = session
+        .messages()
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(results, vec!["hello", "world"]);
+    assert_eq!(session.last_assistant_text(), Some("done"));
+}
+
+#[tokio::test]
 async fn truncated_stream_does_not_corrupt_session() {
     let provider = ScriptedProvider::new(vec![vec![Ok(StreamEvent::TextDelta {
         text: "partial".into(),

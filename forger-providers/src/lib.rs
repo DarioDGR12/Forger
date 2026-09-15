@@ -8,4 +8,4 @@ mod mock;
 mod openai_compat;
 
 pub use mock::{MockProvider, MockScript};
-pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
+pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider, ToolChoice};

@@ -9,11 +9,20 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+    None,
+}
+
 #[derive(Clone, Debug)]
 pub struct OpenAiCompatConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub tool_choice: ToolChoice,
 }
 
 impl OpenAiCompatConfig {
@@ -22,14 +31,29 @@ impl OpenAiCompatConfig {
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
             .ok()?;
-        let base_url =
-            std::env::var("FORGER_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
+        let base_url = std::env::var("FORGER_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
         let model = std::env::var("FORGER_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
         Some(Self {
             base_url,
             api_key,
             model,
+            tool_choice: ToolChoice::Auto,
         })
+    }
+
+    pub fn deepseek(api_key: impl Into<String>) -> Self {
+        Self {
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: api_key.into(),
+            model: "deepseek-chat".into(),
+            tool_choice: ToolChoice::Auto,
+        }
+    }
+
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = tool_choice;
+        self
     }
 }
 
@@ -79,6 +103,11 @@ impl Provider for OpenAiCompatProvider {
         });
         if !tools.is_empty() {
             body["tools"] = tools_to_openai(tools);
+            body["tool_choice"] = match self.config.tool_choice {
+                ToolChoice::Auto => json!("auto"),
+                ToolChoice::Required => json!("required"),
+                ToolChoice::None => json!("none"),
+            };
         }
 
         let request = self
@@ -102,9 +131,9 @@ impl Provider for OpenAiCompatProvider {
             return Err(ProviderError::Transport(format!("HTTP {status}: {text}")));
         }
 
-        let byte_stream = response.bytes_stream().map(|r| {
-            r.map_err(|e| ProviderError::Transport(e.to_string()))
-        });
+        let byte_stream = response
+            .bytes_stream()
+            .map(|r| r.map_err(|e| ProviderError::Transport(e.to_string())));
         Ok(sse_to_events(byte_stream, cancel))
     }
 }
@@ -172,6 +201,7 @@ where
     tokio::spawn(async move {
         futures::pin_mut!(byte_stream);
         let mut buf = String::new();
+        let mut saw_finish = false;
         loop {
             let next = tokio::select! {
                 biased;
@@ -182,17 +212,54 @@ where
                 item = byte_stream.next() => item,
             };
             match next {
-                None => break,
+                None => {
+                    let rest = buf.trim();
+                    if !rest.is_empty() {
+                        match parse_sse_frame(rest) {
+                            ParsedFrame::Done => {
+                                if !saw_finish
+                                    && tx
+                                        .send(Ok(StreamEvent::Finished {
+                                            reason: FinishReason::Stop,
+                                        }))
+                                        .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            ParsedFrame::Events(events) => {
+                                for ev in events {
+                                    if tx.send(ev).is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
                 Some(Err(e)) => {
                     let _ = tx.send(Err(e));
                     break;
                 }
                 Some(Ok(bytes)) => {
                     buf.push_str(&String::from_utf8_lossy(&bytes));
-                    for ev in take_frames(&mut buf) {
+                    let (events, done) = take_frames(&mut buf);
+                    for ev in events {
+                        if matches!(ev, Ok(StreamEvent::Finished { .. })) {
+                            saw_finish = true;
+                        }
                         if tx.send(ev).is_err() {
                             return;
                         }
+                    }
+                    if done {
+                        if !saw_finish {
+                            let _ = tx.send(Ok(StreamEvent::Finished {
+                                reason: FinishReason::Stop,
+                            }));
+                        }
+                        break;
                     }
                 }
             }
@@ -204,8 +271,9 @@ where
     }))
 }
 
-fn take_frames(buf: &mut String) -> Vec<Result<StreamEvent, ProviderError>> {
+fn take_frames(buf: &mut String) -> (Vec<Result<StreamEvent, ProviderError>>, bool) {
     let mut events = Vec::new();
+    let mut done = false;
     loop {
         let idx_lf = buf.find("\n\n");
         let idx_crlf = buf.find("\r\n\r\n");
@@ -223,12 +291,23 @@ fn take_frames(buf: &mut String) -> Vec<Result<StreamEvent, ProviderError>> {
         };
         let frame = buf[..idx].to_string();
         buf.drain(..idx + sep);
-        events.extend(parse_sse_frame(&frame));
+        match parse_sse_frame(&frame) {
+            ParsedFrame::Done => done = true,
+            ParsedFrame::Events(ev) => events.extend(ev),
+        }
+        if done {
+            break;
+        }
     }
-    events
+    (events, done)
 }
 
-pub(crate) fn parse_sse_frame(frame: &str) -> Vec<Result<StreamEvent, ProviderError>> {
+enum ParsedFrame {
+    Events(Vec<Result<StreamEvent, ProviderError>>),
+    Done,
+}
+
+fn parse_sse_frame(frame: &str) -> ParsedFrame {
     let mut data_lines = Vec::new();
     for line in frame.lines() {
         let line = line.trim_end_matches('\r');
@@ -237,20 +316,23 @@ pub(crate) fn parse_sse_frame(frame: &str) -> Vec<Result<StreamEvent, ProviderEr
         }
     }
     if data_lines.is_empty() {
-        return Vec::new();
+        return ParsedFrame::Events(Vec::new());
     }
     let data = data_lines.join("\n");
     if data == "[DONE]" {
-        return Vec::new();
+        return ParsedFrame::Done;
     }
     match serde_json::from_str::<ChatChunk>(&data) {
-        Ok(chunk) => chunk_to_events(chunk),
-        Err(e) => vec![Err(ProviderError::InvalidResponse(format!("{e}: {data}")))],
+        Ok(chunk) => ParsedFrame::Events(chunk_to_events(chunk)),
+        Err(e) => ParsedFrame::Events(vec![Err(ProviderError::InvalidResponse(format!(
+            "{e}: {data}"
+        )))]),
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatChunk {
+    #[serde(default)]
     choices: Vec<Choice>,
 }
 
@@ -269,6 +351,7 @@ struct Delta {
 
 #[derive(Debug, Deserialize)]
 struct DeltaToolCall {
+    #[serde(default)]
     index: usize,
     id: Option<String>,
     function: Option<DeltaFunction>,
@@ -277,7 +360,20 @@ struct DeltaToolCall {
 #[derive(Debug, Deserialize)]
 struct DeltaFunction {
     name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_stringish")]
     arguments: Option<String>,
+}
+
+fn deserialize_opt_stringish<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s),
+        Some(other) => Some(other.to_string()),
+    })
 }
 
 fn chunk_to_events(chunk: ChatChunk) -> Vec<Result<StreamEvent, ProviderError>> {
@@ -316,13 +412,18 @@ fn chunk_to_events(chunk: ChatChunk) -> Vec<Result<StreamEvent, ProviderError>> 
 mod tests {
     use super::*;
 
+    fn events(frame: &str) -> Vec<Result<StreamEvent, ProviderError>> {
+        match parse_sse_frame(frame) {
+            ParsedFrame::Events(ev) => ev,
+            ParsedFrame::Done => panic!("expected data frame, got [DONE]"),
+        }
+    }
+
     #[test]
     fn parses_text_delta_and_finish() {
-        let frame = r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#;
-        let ev = parse_sse_frame(frame);
+        let ev = events(r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#);
         assert!(matches!(ev[0], Ok(StreamEvent::TextDelta { .. })));
-        let done = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
-        let ev = parse_sse_frame(done);
+        let ev = events(r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
         assert!(matches!(
             ev[0],
             Ok(StreamEvent::Finished {
@@ -333,10 +434,13 @@ mod tests {
 
     #[test]
     fn parses_tool_call_delta() {
-        let frame = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#;
-        let ev = parse_sse_frame(frame);
+        let ev = events(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#,
+        );
         match &ev[0] {
-            Ok(StreamEvent::ToolCallDelta { name, arguments, .. }) => {
+            Ok(StreamEvent::ToolCallDelta {
+                name, arguments, ..
+            }) => {
                 assert_eq!(name.as_deref(), Some("read_file"));
                 assert_eq!(arguments.as_deref(), Some("{}"));
             }
@@ -346,6 +450,62 @@ mod tests {
 
     #[test]
     fn done_frame_is_empty() {
-        assert!(parse_sse_frame("data: [DONE]").is_empty());
+        assert!(matches!(parse_sse_frame("data: [DONE]"), ParsedFrame::Done));
+    }
+
+    #[test]
+    fn missing_tool_call_index_defaults_to_zero() {
+        let ev = events(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"n","arguments":"{}"}}]}}]}"#,
+        );
+        match &ev[0] {
+            Ok(StreamEvent::ToolCallDelta { index, name, .. }) => {
+                assert_eq!(*index, 0);
+                assert_eq!(name.as_deref(), Some("n"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn take_frames_keeps_index_across_fragmented_tool_call_chunks() {
+        let mut buf = String::from(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c1","function":{"name":"get_time","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"get_weather","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"tz\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Tokyo\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"UTC\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+
+"#,
+        );
+        let (events, done) = take_frames(&mut buf);
+        assert!(done);
+        let events: Vec<StreamEvent> = events.into_iter().map(|r| r.expect("frame")).collect();
+        let mut acc = forger_core::ToolCallAccumulator::new();
+        for ev in &events {
+            acc.apply_event(ev);
+        }
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(calls[1].name, "get_time");
+        assert_eq!(calls[1].arguments, r#"{"tz":"UTC"}"#);
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Finished {
+                reason: FinishReason::ToolCalls
+            })
+        ));
     }
 }
