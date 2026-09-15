@@ -201,6 +201,7 @@ where
     tokio::spawn(async move {
         futures::pin_mut!(byte_stream);
         let mut buf = String::new();
+        let mut saw_finish = false;
         loop {
             let next = tokio::select! {
                 biased;
@@ -214,9 +215,24 @@ where
                 None => {
                     let rest = buf.trim();
                     if !rest.is_empty() {
-                        for ev in parse_sse_frame(rest) {
-                            if tx.send(ev).is_err() {
-                                return;
+                        match parse_sse_frame(rest) {
+                            ParsedFrame::Done => {
+                                if !saw_finish
+                                    && tx
+                                        .send(Ok(StreamEvent::Finished {
+                                            reason: FinishReason::Stop,
+                                        }))
+                                        .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            ParsedFrame::Events(events) => {
+                                for ev in events {
+                                    if tx.send(ev).is_err() {
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
@@ -228,10 +244,22 @@ where
                 }
                 Some(Ok(bytes)) => {
                     buf.push_str(&String::from_utf8_lossy(&bytes));
-                    for ev in take_frames(&mut buf) {
+                    let (events, done) = take_frames(&mut buf);
+                    for ev in events {
+                        if matches!(ev, Ok(StreamEvent::Finished { .. })) {
+                            saw_finish = true;
+                        }
                         if tx.send(ev).is_err() {
                             return;
                         }
+                    }
+                    if done {
+                        if !saw_finish {
+                            let _ = tx.send(Ok(StreamEvent::Finished {
+                                reason: FinishReason::Stop,
+                            }));
+                        }
+                        break;
                     }
                 }
             }
@@ -243,8 +271,9 @@ where
     }))
 }
 
-fn take_frames(buf: &mut String) -> Vec<Result<StreamEvent, ProviderError>> {
+fn take_frames(buf: &mut String) -> (Vec<Result<StreamEvent, ProviderError>>, bool) {
     let mut events = Vec::new();
+    let mut done = false;
     loop {
         let idx_lf = buf.find("\n\n");
         let idx_crlf = buf.find("\r\n\r\n");
@@ -262,12 +291,23 @@ fn take_frames(buf: &mut String) -> Vec<Result<StreamEvent, ProviderError>> {
         };
         let frame = buf[..idx].to_string();
         buf.drain(..idx + sep);
-        events.extend(parse_sse_frame(&frame));
+        match parse_sse_frame(&frame) {
+            ParsedFrame::Done => done = true,
+            ParsedFrame::Events(ev) => events.extend(ev),
+        }
+        if done {
+            break;
+        }
     }
-    events
+    (events, done)
 }
 
-pub(crate) fn parse_sse_frame(frame: &str) -> Vec<Result<StreamEvent, ProviderError>> {
+enum ParsedFrame {
+    Events(Vec<Result<StreamEvent, ProviderError>>),
+    Done,
+}
+
+fn parse_sse_frame(frame: &str) -> ParsedFrame {
     let mut data_lines = Vec::new();
     for line in frame.lines() {
         let line = line.trim_end_matches('\r');
@@ -276,20 +316,23 @@ pub(crate) fn parse_sse_frame(frame: &str) -> Vec<Result<StreamEvent, ProviderEr
         }
     }
     if data_lines.is_empty() {
-        return Vec::new();
+        return ParsedFrame::Events(Vec::new());
     }
     let data = data_lines.join("\n");
     if data == "[DONE]" {
-        return Vec::new();
+        return ParsedFrame::Done;
     }
     match serde_json::from_str::<ChatChunk>(&data) {
-        Ok(chunk) => chunk_to_events(chunk),
-        Err(e) => vec![Err(ProviderError::InvalidResponse(format!("{e}: {data}")))],
+        Ok(chunk) => ParsedFrame::Events(chunk_to_events(chunk)),
+        Err(e) => ParsedFrame::Events(vec![Err(ProviderError::InvalidResponse(format!(
+            "{e}: {data}"
+        )))]),
     }
 }
 
 #[derive(Debug, Deserialize)]
 struct ChatChunk {
+    #[serde(default)]
     choices: Vec<Choice>,
 }
 
@@ -369,13 +412,18 @@ fn chunk_to_events(chunk: ChatChunk) -> Vec<Result<StreamEvent, ProviderError>> 
 mod tests {
     use super::*;
 
+    fn events(frame: &str) -> Vec<Result<StreamEvent, ProviderError>> {
+        match parse_sse_frame(frame) {
+            ParsedFrame::Events(ev) => ev,
+            ParsedFrame::Done => panic!("expected data frame, got [DONE]"),
+        }
+    }
+
     #[test]
     fn parses_text_delta_and_finish() {
-        let frame = r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#;
-        let ev = parse_sse_frame(frame);
+        let ev = events(r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#);
         assert!(matches!(ev[0], Ok(StreamEvent::TextDelta { .. })));
-        let done = r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
-        let ev = parse_sse_frame(done);
+        let ev = events(r#"data: {"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
         assert!(matches!(
             ev[0],
             Ok(StreamEvent::Finished {
@@ -386,8 +434,9 @@ mod tests {
 
     #[test]
     fn parses_tool_call_delta() {
-        let frame = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#;
-        let ev = parse_sse_frame(frame);
+        let ev = events(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#,
+        );
         match &ev[0] {
             Ok(StreamEvent::ToolCallDelta {
                 name, arguments, ..
@@ -401,13 +450,14 @@ mod tests {
 
     #[test]
     fn done_frame_is_empty() {
-        assert!(parse_sse_frame("data: [DONE]").is_empty());
+        assert!(matches!(parse_sse_frame("data: [DONE]"), ParsedFrame::Done));
     }
 
     #[test]
     fn missing_tool_call_index_defaults_to_zero() {
-        let frame = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"n","arguments":"{}"}}]}}]}"#;
-        let ev = parse_sse_frame(frame);
+        let ev = events(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"n","arguments":"{}"}}]}}]}"#,
+        );
         match &ev[0] {
             Ok(StreamEvent::ToolCallDelta { index, name, .. }) => {
                 assert_eq!(*index, 0);
@@ -434,12 +484,13 @@ data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"
 
 data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
 
+data: [DONE]
+
 "#,
         );
-        let events: Vec<StreamEvent> = take_frames(&mut buf)
-            .into_iter()
-            .map(|r| r.expect("frame"))
-            .collect();
+        let (events, done) = take_frames(&mut buf);
+        assert!(done);
+        let events: Vec<StreamEvent> = events.into_iter().map(|r| r.expect("frame")).collect();
         let mut acc = forger_core::ToolCallAccumulator::new();
         for ev in &events {
             acc.apply_event(ev);
