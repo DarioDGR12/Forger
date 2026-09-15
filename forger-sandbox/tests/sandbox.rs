@@ -109,6 +109,39 @@ async fn write_config_then_rename_to_env_is_blocked() {
 }
 
 #[tokio::test]
+async fn write_config_then_shell_mv_to_env_is_rolled_back() {
+    let (_dir, sb) = sandbox();
+    let cancel = CancellationToken::new();
+    sb.write(
+        Path::new("config"),
+        "SECRET=1",
+        WritePermit::Normal,
+        &cancel,
+    )
+    .await
+    .unwrap();
+
+    let err = sb
+        .run("mv config .env", Duration::from_secs(5), &cancel)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SandboxError::Denylist {
+                pattern: ".env",
+                ..
+            }
+        ),
+        "shell mv to .env must be rolled back as denylist, got {err:?}"
+    );
+    assert!(
+        !sb.workspace().join(".env").exists(),
+        "`.env` must not remain after a shell rename"
+    );
+}
+
+#[tokio::test]
 async fn denylist_override_must_match_resolved_path() {
     let (_dir, sb) = sandbox();
     let decision = sb.inspect(Path::new(".env")).unwrap();

@@ -19,12 +19,15 @@ generic "sensitive tool" confirmation:
 final path (and on a full canonicalize if the target already exists). So
 `write("config")` then `rename(".env")` is blocked, as is `innocent → .env`.
 
-### Accepted gap: shell rename
+After `run_command`, the workspace is re-scanned. Newly created denylist
+files (the `mv config .env` case) are deleted and the command is reported
+as blocked. `.git` is skipped so `git init` still works.
 
-A `run_command` can still `echo SECRET > tmp && mv tmp .env`. Filename policy
-on the write/rename **API** cannot see mutations the shell performs. Closing
-that fully means intercepting every filesystem mutation inside the sandbox
-(Landlock is an allowlist of trees, not a filename denylist). Documented,
+### Residual gap: overwrite / in-place shell edits
+
+If `.env` already exists, `run_command` can still `mv -f tmp .env` or
+`echo secret >> .env`. Detecting that without snapshots of file contents is
+a different problem (and Landlock cannot denylist by filename). Documented,
 not hidden.
 
 ## Landlock `SCOPE_SIGNAL` (Linux < 6.12)

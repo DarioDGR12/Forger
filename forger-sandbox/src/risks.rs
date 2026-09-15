@@ -4,9 +4,9 @@
 //!    canonicalized (`canonicalize(parent)` + file name) and
 //!    [`crate::denylist::is_sensitive`] runs on that result, not only the
 //!    originally requested name. `write("config")` then `rename(".env")`
-//!    is refused. A `run_command` can still `mv` onto `.env` inside the
-//!    shell; that remains an accepted gap (Landlock is a tree allowlist,
-//!    not a filename denylist).
+//!    is refused. `run_command` that creates a *new* denylist file (e.g.
+//!    `mv config .env`) is rolled back after the command. Overwriting an
+//!    already-present `.env` via the shell is still a residual gap.
 //!
 //! 2. **Landlock SCOPE_SIGNAL (Linux < 6.12 / ABI < 6):** a process inside
 //!    the sandbox can send `kill -9` to other processes of the same user,

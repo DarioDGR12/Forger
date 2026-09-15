@@ -13,9 +13,10 @@
 //!    supervisor in the parent so a hung process cannot stall the agent loop.
 //!
 //! Accepted, documented risks — see [`crate::risks`]:
-//! - Filename denylist cannot see a later `mv innocent .env` performed inside
-//!   a shell (`run_command`). Writes and renames through this crate always
-//!   re-check the canonical final path.
+//! - Filename denylist cannot see every mutation a shell performs (in-place
+//!   edits of an *existing* `.env`, or `mv` over a file that was already
+//!   denylisted). New sensitive files created by `run_command` (e.g.
+//!   `mv config .env`) are detected and removed after the command.
 //! - Linux kernels without Landlock ABI 6 (`SCOPE_SIGNAL`, 6.12+) can let a
 //!   sandboxed process `kill -9` other same-user processes, including Forger.
 //!   We **warn at runtime** and never pretend this is closed.
@@ -277,14 +278,25 @@ impl Sandbox for FsSandbox {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<CommandOutput, SandboxError> {
-        exec::run_command(
+        let before = denylist::snapshot_sensitive(&self.workspace);
+        let result = exec::run_command(
             &self.workspace,
             command,
             timeout,
             cancel,
             self.landlock_warning.as_deref(),
         )
-        .await
+        .await;
+        // Shell `mv config .env` is not visible to write/rename. Re-scan and
+        // delete newly created denylist files so the documented rename bypass
+        // does not land on disk.
+        if let Some(hit) = denylist::rollback_new_sensitive(&self.workspace, &before) {
+            return Err(SandboxError::Denylist {
+                path: hit.path.display().to_string(),
+                pattern: hit.pattern,
+            });
+        }
+        result
     }
 
     async fn list(
