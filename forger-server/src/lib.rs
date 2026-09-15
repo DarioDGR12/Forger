@@ -39,9 +39,7 @@ struct AppState {
 
 pub async fn run(addr: SocketAddr, workspace: PathBuf) -> Result<()> {
     if !addr.ip().is_loopback() {
-        bail!(
-            "refusing to listen on {addr}. {NO_AUTH_BANNER}"
-        );
+        bail!("refusing to listen on {addr}. {NO_AUTH_BANNER}");
     }
     let workspace = std::fs::canonicalize(&workspace).unwrap_or(workspace);
     tracing::warn!("{NO_AUTH_BANNER}");
@@ -96,6 +94,9 @@ struct TurnBody {
     yes: bool,
     #[serde(default)]
     allow_denied_paths: bool,
+    /// Optional turn budget. Defaults to AgentLoopConfig's 20.
+    #[serde(default)]
+    max_turns: Option<usize>,
 }
 
 async fn turn_sse(
@@ -108,15 +109,16 @@ async fn turn_sse(
     tokio::spawn(async move {
         let result = run_one_turn(workspace, sessions, body, tx.clone()).await;
         if let Err(e) = result {
-            let _ = tx.send(
-                serde_json::json!({"type":"error","message": e.to_string()}).to_string(),
-            );
+            let _ =
+                tx.send(serde_json::json!({"type":"error","message": e.to_string()}).to_string());
         }
         let _ = tx.send(serde_json::json!({"type":"done"}).to_string());
     });
 
     let stream = futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|data| (Ok(Event::default().data(data)), rx))
+        rx.recv()
+            .await
+            .map(|data| (Ok(Event::default().data(data)), rx))
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
@@ -142,18 +144,19 @@ async fn run_one_turn(
         allow_sensitive: body.yes,
         allow_denylist: body.allow_denied_paths,
     });
-    let agent = AgentLoop::new(
-        provider,
-        tools,
-        approver,
-        AgentLoopConfig {
-            workspace,
-            ..AgentLoopConfig::default()
-        },
-    );
+    let mut config = AgentLoopConfig {
+        workspace,
+        ..AgentLoopConfig::default()
+    };
+    if let Some(n) = body.max_turns {
+        config = config.with_max_turns(n);
+    }
+    let agent = AgentLoop::new(provider, tools, approver, config);
 
     let mut guard = sessions.lock().await;
-    let session = guard.entry(body.session_id.clone()).or_insert_with(Session::new);
+    let session = guard
+        .entry(body.session_id.clone())
+        .or_insert_with(Session::new);
     // Clone out so we don't hold the lock across the turn (cancel must not
     // leave a half-written session in the map).
     let mut local = session.clone();
@@ -167,9 +170,7 @@ async fn run_one_turn(
     let outcome = agent
         .run_turn(
             &mut local,
-            UserTurn {
-                text: body.message,
-            },
+            UserTurn { text: body.message },
             cancel,
             &mut sink,
         )
@@ -240,6 +241,7 @@ document.getElementById('send').onclick = async () => {
         const ev = JSON.parse(line);
         if (ev.type === 'text_delta') log(ev.text || '');
         else if (ev.type === 'tool_call') log('\n→ ' + (ev.call && ev.call.name) + '\n');
+        else if (ev.type === 'finished') log('\n[' + (ev.outcome || 'done') + ']\n');
         else if (ev.type === 'warning' || ev.type === 'error') log('\n[' + ev.type + '] ' + (ev.message || '') + '\n');
       } catch (e) { log(line); }
     }

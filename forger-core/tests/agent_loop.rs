@@ -656,3 +656,96 @@ async fn multiple_tool_calls_in_one_turn_keep_order_and_matching_ids() {
     assert_eq!(tools[1].content, "two");
     assert_eq!(session.last_assistant_text(), Some("both"));
 }
+
+#[tokio::test]
+async fn fragmented_tool_name_and_id_are_concatenated() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let agent = loop_with(
+        ScriptedProvider::new(vec![
+            vec![
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("c".into()),
+                    name: Some("ech".into()),
+                    arguments: Some(r#"{"text":""#.into()),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("1".into()),
+                    name: Some("o".into()),
+                    arguments: Some(r#"ok"}"#.into()),
+                }),
+                Ok(StreamEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                }),
+            ],
+            text_then("recovered"),
+        ]),
+        tools,
+        AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        },
+    );
+    let mut session = Session::new();
+    run(&agent, &mut session, "go").await.unwrap();
+    let assistant = session
+        .messages()
+        .iter()
+        .find(|m| m.role == Role::Assistant && m.has_tool_calls())
+        .unwrap();
+    let call = &assistant.tool_calls.as_ref().unwrap()[0];
+    assert_eq!(call.id, "c1");
+    assert_eq!(call.name, "echo");
+    assert_eq!(call.arguments, r#"{"text":"ok"}"#);
+    let tool_msg = session
+        .messages()
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .unwrap();
+    assert_eq!(tool_msg.content, "ok");
+}
+
+#[tokio::test]
+async fn missing_tool_call_ids_stay_unique_across_parallel_calls() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let agent = loop_with(
+        ScriptedProvider::new(vec![
+            vec![
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: None,
+                    name: Some("echo".into()),
+                    arguments: Some(r#"{"text":"a"}"#.into()),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 1,
+                    id: None,
+                    name: Some("echo".into()),
+                    arguments: Some(r#"{"text":"b"}"#.into()),
+                }),
+                Ok(StreamEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                }),
+            ],
+            text_then("done"),
+        ]),
+        tools,
+        AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        },
+    );
+    let mut session = Session::new();
+    run(&agent, &mut session, "go").await.unwrap();
+    let ids: Vec<_> = session
+        .messages()
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .map(|m| m.tool_call_id.clone().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["call-0".to_string(), "call-1".to_string()]);
+    assert_ne!(ids[0], ids[1]);
+}

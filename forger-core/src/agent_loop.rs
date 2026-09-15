@@ -144,11 +144,14 @@ impl AgentLoop {
                                 builders.push(ToolCallBuilder::default());
                             }
                             let b = &mut builders[index];
+                            // Fragments must be concatenated (DeepSeek / some
+                            // OpenAI-compat backends split `id` and `name`
+                            // across SSE chunks). Overwriting dropped the prefix.
                             if let Some(id) = id {
-                                b.id = id;
+                                b.id.push_str(&id);
                             }
                             if let Some(name) = name {
-                                b.name = name;
+                                b.name.push_str(&name);
                             }
                             if let Some(arguments) = arguments {
                                 b.arguments.push_str(&arguments);
@@ -165,7 +168,8 @@ impl AgentLoop {
         let reason = finish.unwrap_or(FinishReason::Stop);
         let calls: Vec<ToolCall> = builders
             .into_iter()
-            .filter_map(|b| b.into_tool_call())
+            .enumerate()
+            .filter_map(|(index, b)| b.into_tool_call(index))
             .collect();
         Ok((text, calls, reason))
     }
@@ -369,13 +373,15 @@ struct ToolCallBuilder {
 }
 
 impl ToolCallBuilder {
-    fn into_tool_call(self) -> Option<ToolCall> {
-        if self.name.is_empty() && self.id.is_empty() {
+    fn into_tool_call(self, index: usize) -> Option<ToolCall> {
+        if self.name.is_empty() && self.id.is_empty() && self.arguments.is_empty() {
             return None;
         }
         Some(ToolCall {
+            // Parallel calls with no id must not collide (`call-echo` twice
+            // would make tool results ambiguous for the model).
             id: if self.id.is_empty() {
-                format!("call-{}", self.name)
+                format!("call-{index}")
             } else {
                 self.id
             },

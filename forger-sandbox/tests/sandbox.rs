@@ -208,3 +208,22 @@ async fn read_env_allowed_with_matching_override() {
         .unwrap();
     assert_eq!(got, "SECRET=1");
 }
+
+#[tokio::test]
+async fn write_outside_workspace_via_dotdot_is_rejected() {
+    let (dir, sb) = sandbox();
+    let err = sb
+        .write(
+            Path::new("../outside.txt"),
+            "nope",
+            WritePermit::Normal,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, SandboxError::OutsideWorkspace { .. }),
+        "expected outside workspace, got {err:?}"
+    );
+    assert!(!dir.path().parent().unwrap().join("outside.txt").exists());
+}
