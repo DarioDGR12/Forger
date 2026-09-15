@@ -1,10 +1,11 @@
 //! Documented accepted risks. These are not silent.
 //!
-//! 1. **Rename bypass (partially closed for `write_file`):** a command can
-//!    create a file under a harmless name and `mv` it onto `.env`.
-//!    [`crate::path::resolve_final_path`] checks the destination of each
-//!    write tool, including when the requested name is a symlink. Shell
-//!    `mv`/`cp` inside `run_command` is still an accepted gap.
+//! 1. **Rename/read bypass via `run_command` (partially closed for
+//!    `write_file`/`read_file`):** a command can create a file under a harmless
+//!    name and `mv` it onto `.env`, or `cat .env` to exfiltrate. Path tools
+//!    re-resolve the destination (including when the requested name is a
+//!    symlink). Shell `mv`/`cp`/`cat` inside `run_command` is still an
+//!    accepted gap.
 //!
 //! 2. **Landlock SCOPE_SIGNAL (Linux < 6.12 / ABI < 6):** a process inside
 //!    the sandbox can send `kill -9` to other processes of the same user,
@@ -43,14 +44,12 @@ pub fn signal_scope_warning(abi: LandlockAbi) -> Option<String> {
     match abi {
         LandlockAbi::Version(v) if v >= SIGNAL_SCOPE_MIN_ABI => None,
         LandlockAbi::Version(v) => {
-            let msg = format!(
-                "Landlock ABI {v} < {SIGNAL_SCOPE_MIN_ABI}. {SIGNAL_SCOPE_WARNING}"
-            );
+            let msg = format!("Landlock ABI {v} < {SIGNAL_SCOPE_MIN_ABI}. {SIGNAL_SCOPE_WARNING}");
             Some(msg)
         }
-        LandlockAbi::Unavailable => Some(format!(
-            "Landlock is unavailable. {SIGNAL_SCOPE_WARNING}"
-        )),
+        LandlockAbi::Unavailable => {
+            Some(format!("Landlock is unavailable. {SIGNAL_SCOPE_WARNING}"))
+        }
     }
 }
 
@@ -85,7 +84,12 @@ mod tests {
     #[test]
     fn unavailable_warns() {
         let w = signal_scope_warning(LandlockAbi::Unavailable).unwrap();
-        assert!(w.contains("unavailable") || w.contains("UNAVAILABLE") || w.contains("unavailable") || w.to_lowercase().contains("unavailable"));
+        assert!(
+            w.contains("unavailable")
+                || w.contains("UNAVAILABLE")
+                || w.contains("unavailable")
+                || w.to_lowercase().contains("unavailable")
+        );
         assert!(w.contains("kill -9"));
     }
 }

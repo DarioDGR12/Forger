@@ -17,12 +17,19 @@ generic "sensitive tool" confirmation:
 `write_file` resolves symlinks and `..` **before** the denylist check, so
 `innocent → .env` is treated as `.env`.
 
-### Accepted gap: shell rename
+### Accepted gap: shell rename **and reads**
 
 A `run_command` can `echo SECRET > tmp && mv tmp .env`. Filename policy on
-`write_file` cannot see that. Closing it fully means intercepting the final
-path of every filesystem mutation inside the sandbox (Landlock is an
-allowlist of trees, not a filename denylist). Documented, not hidden.
+`write_file` cannot see that. The same gap covers **reads**: `cat .env` (or
+`cp .env /tmp`) inside an approved `run_command` never hits the userspace
+denylist, because Landlock is an allowlist of **trees** (the workspace is
+fully readable/writable) rather than a filename policy.
+
+`--yes` approves the sensitive `run_command` tool and does **not** punch
+through `write_file`/`read_file` denylist checks. It *does* let a confirmed
+shell command touch denied names. Closing this fully means intercepting the
+final path of every filesystem mutation inside the sandbox. Documented, not
+hidden.
 
 ## Landlock `SCOPE_SIGNAL` (Linux < 6.12)
 

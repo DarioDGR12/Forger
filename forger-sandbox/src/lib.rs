@@ -81,7 +81,12 @@ pub trait Sandbox: Plugin {
 
     fn inspect(&self, requested: &Path) -> Result<PathDecision, SandboxError>;
 
-    async fn read(&self, requested: &Path, cancel: &CancellationToken) -> Result<String, SandboxError>;
+    async fn read(
+        &self,
+        requested: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<String, SandboxError>;
 
     async fn write(
         &self,
@@ -177,12 +182,17 @@ impl Sandbox for FsSandbox {
         self.decide(requested)
     }
 
-    async fn read(&self, requested: &Path, cancel: &CancellationToken) -> Result<String, SandboxError> {
+    async fn read(
+        &self,
+        requested: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<String, SandboxError> {
         if cancel.is_cancelled() {
             return Err(SandboxError::Cancelled);
         }
         let decision = self.decide(requested)?;
-        self.enforce_denylist(&decision, &WritePermit::Normal)?;
+        self.enforce_denylist(&decision, &permit)?;
         Ok(tokio::fs::read_to_string(&decision.resolved).await?)
     }
 
@@ -211,8 +221,14 @@ impl Sandbox for FsSandbox {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<CommandOutput, SandboxError> {
-        exec::run_command(&self.workspace, command, timeout, cancel, self.landlock_warning.as_deref())
-            .await
+        exec::run_command(
+            &self.workspace,
+            command,
+            timeout,
+            cancel,
+            self.landlock_warning.as_deref(),
+        )
+        .await
     }
 
     fn landlock_warning(&self) -> Option<String> {

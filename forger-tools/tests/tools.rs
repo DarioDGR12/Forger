@@ -46,6 +46,32 @@ async fn write_env_denied_without_override() {
 }
 
 #[tokio::test]
+async fn read_env_denied_without_override() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
+    let read = ReadFile::new(sb);
+    let err = read
+        .execute(json!({"path":".env"}), &ctx(dir.path(), false))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ToolError::Denied { .. }));
+}
+
+#[tokio::test]
+async fn read_env_honors_denylist_override() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
+    let read = ReadFile::new(sb);
+    let got = read
+        .execute(json!({"path":".env"}), &ctx(dir.path(), true))
+        .await
+        .unwrap();
+    assert_eq!(got, "SECRET=1");
+}
+
+#[tokio::test]
 async fn hung_run_command_times_out() {
     let dir = tempdir().unwrap();
     let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());

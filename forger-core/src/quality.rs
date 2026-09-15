@@ -97,12 +97,7 @@ impl QualityRunner {
                 let mut session = Session::new();
                 let mut sink = |_ev: AgentEvent| {};
                 let outcome = agent
-                    .run_turn(
-                        &mut session,
-                        UserTurn { text: task },
-                        cancel,
-                        &mut sink,
-                    )
+                    .run_turn(&mut session, UserTurn { text: task }, cancel, &mut sink)
                     .await;
                 (i, session, outcome)
             }));
@@ -122,15 +117,13 @@ impl QualityRunner {
         let mut scored = Vec::new();
         for (i, session, outcome) in &raw {
             let text = match outcome {
-                Ok(TurnOutcome::Completed) => session
-                    .last_assistant_text()
-                    .unwrap_or("")
-                    .to_string(),
-                Ok(TurnOutcome::Cancelled) => String::new(),
-                Ok(TurnOutcome::Failed) | Err(_) => session
-                    .last_assistant_text()
-                    .unwrap_or("")
-                    .to_string(),
+                Ok(TurnOutcome::Completed) => {
+                    session.last_assistant_text().unwrap_or("").to_string()
+                }
+                Ok(TurnOutcome::Cancelled) | Ok(TurnOutcome::StepLimit) => String::new(),
+                Ok(TurnOutcome::Failed) | Err(_) => {
+                    session.last_assistant_text().unwrap_or("").to_string()
+                }
             };
             let (score, rationale) = self.score_candidate(*i, task, &text, &cancel).await?;
             scored.push(ScoredCandidate {
@@ -200,11 +193,7 @@ fn parse_score(raw: &str) -> (u8, String) {
         trimmed
     };
     if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_slice) {
-        let score = v
-            .get("score")
-            .and_then(|s| s.as_u64())
-            .unwrap_or(0)
-            .min(10) as u8;
+        let score = v.get("score").and_then(|s| s.as_u64()).unwrap_or(0).min(10) as u8;
         let rationale = v
             .get("rationale")
             .and_then(|s| s.as_str())

@@ -13,13 +13,27 @@ pub struct UserTurn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    TextDelta { text: String },
-    ToolCall { call: ToolCall },
-    ToolResult { call_id: String, name: String, output: String },
-    Warning { message: String },
-    Step { index: usize },
+    TextDelta {
+        text: String,
+    },
+    ToolCall {
+        call: ToolCall,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        output: String,
+    },
+    Warning {
+        message: String,
+    },
+    Step {
+        index: usize,
+    },
     Cancelled,
-    Finished { outcome: TurnOutcome },
+    Finished {
+        outcome: TurnOutcome,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,6 +42,10 @@ pub enum TurnOutcome {
     Completed,
     Cancelled,
     Failed,
+    /// The turn budget (`max_steps` / max turns) was exhausted after a
+    /// provider call. Tool results from that last call are committed so the
+    /// session never has a `tool_calls` message without matching results.
+    StepLimit,
 }
 
 /// Swappable agent driver. [`crate::agent_loop::AgentLoop`] is the default.

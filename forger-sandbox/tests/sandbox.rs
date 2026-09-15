@@ -24,7 +24,13 @@ async fn write_to_env_is_blocked() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, SandboxError::Denylist { pattern: ".env", .. }));
+    assert!(matches!(
+        err,
+        SandboxError::Denylist {
+            pattern: ".env",
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -42,7 +48,13 @@ async fn write_via_symlink_to_env_is_blocked() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, SandboxError::Denylist { pattern: ".env", .. }),
+        matches!(
+            err,
+            SandboxError::Denylist {
+                pattern: ".env",
+                ..
+            }
+        ),
         "symlink must be resolved before the denylist check, got {err:?}"
     );
 }
@@ -104,7 +116,11 @@ async fn hung_command_is_killed_by_timeout_supervisor() {
 async fn echo_command_works() {
     let (_dir, sb) = sandbox();
     let out = sb
-        .run("echo hello", Duration::from_secs(5), &CancellationToken::new())
+        .run(
+            "echo hello",
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(out.exit_code, 0);
@@ -129,4 +145,43 @@ async fn git_and_ssh_paths_blocked() {
             "{p} should be denylisted, got {err:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn read_env_blocked_without_override() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    let err = sb
+        .read(
+            Path::new(".env"),
+            WritePermit::Normal,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        SandboxError::Denylist {
+            pattern: ".env",
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn read_env_allowed_with_matching_override() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    let decision = sb.inspect(Path::new(".env")).unwrap();
+    let got = sb
+        .read(
+            Path::new(".env"),
+            WritePermit::DenylistOverride {
+                confirmed_resolved: decision.resolved,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(got, "SECRET=1");
 }
