@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "forger-core",
+    "forger-sandbox",
+    "forger-providers",
+    "forger-tools",
+    "forger-cli",
+    "forger-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Dario Gonzalez"]
+repository = "https://github.com/DarioDGR12/Forger"
+rust-version = "1.85"
+description = "A modular coding agent in Rust — everything is a plugin"
+
+[workspace.dependencies]
+async-trait = "0.1.83"
+axum = { version = "0.8", features = ["ws"] }
+bytes = "1.9.0"
+clap = { version = "4.5", features = ["derive", "env"] }
+futures = "0.3.31"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+serde = { version = "1.0.216", features = ["derive"] }
+serde_json = "1.0.134"
+tempfile = "3.14.0"
+thiserror = "2.0.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "process", "io-util", "sync"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+nix = { version = "0.29.0", features = ["process", "signal"] }
+landlock = "0.4.7"
+libc = "0.2.169"
+anyhow = "1.0.94"
+forger-core = { path = "forger-core" }
+forger-sandbox = { path = "forger-sandbox" }
+forger-providers = { path = "forger-providers" }
+forger-tools = { path = "forger-tools" }
+forger-server = { path = "forger-server" }
