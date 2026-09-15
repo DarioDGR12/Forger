@@ -142,6 +142,30 @@ async fn write_config_then_shell_mv_to_env_is_rolled_back() {
 }
 
 #[tokio::test]
+async fn rename_env_to_config_is_blocked() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    let err = sb
+        .rename(
+            Path::new(".env"),
+            Path::new("config"),
+            WritePermit::Normal,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        SandboxError::Denylist {
+            pattern: ".env",
+            ..
+        }
+    ));
+    assert!(dir.path().join(".env").exists());
+    assert!(!dir.path().join("config").exists());
+}
+
+#[tokio::test]
 async fn denylist_override_must_match_resolved_path() {
     let (_dir, sb) = sandbox();
     let decision = sb.inspect(Path::new(".env")).unwrap();

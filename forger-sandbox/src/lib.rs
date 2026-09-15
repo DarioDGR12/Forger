@@ -110,8 +110,9 @@ pub trait Sandbox: Plugin {
         cancel: &CancellationToken,
     ) -> Result<(), SandboxError>;
 
-    /// Rename `from` → `to`. The **destination** is resolved and denylisted
-    /// the same way as [`Self::write`], so moving `config` onto `.env` fails.
+    /// Rename `from` → `to`. Source **and** destination are resolved and
+    /// denylisted the same way as [`Self::write`], so `config` → `.env`
+    /// and `.env` → `config` both fail.
     async fn rename(
         &self,
         from: &Path,
@@ -261,13 +262,9 @@ impl Sandbox for FsSandbox {
         }
         let dest = self.decide(to)?;
         self.enforce_denylist(&dest, &permit)?;
-        let src = path::resolve_final_path(&self.workspace, from)?;
-        if !path::is_inside(&self.workspace, &src) {
-            return Err(SandboxError::OutsideWorkspace {
-                path: src.display().to_string(),
-            });
-        }
-        tokio::fs::rename(&src, &dest.resolved).await?;
+        let src = self.decide(from)?;
+        self.enforce_denylist(&src, &permit)?;
+        tokio::fs::rename(&src.resolved, &dest.resolved).await?;
         Ok(())
     }
 

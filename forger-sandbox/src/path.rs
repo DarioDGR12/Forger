@@ -7,10 +7,8 @@
 //!    such as `config` → `.env`)
 //!
 //! [`crate::denylist::is_sensitive`] / [`crate::denylist::check`] then run on
-//! that result, not only on the original requested name.
-//!
-//! A later `mv` inside `run_command` is still a documented shell gap; the
-//! sandbox `rename` API is not.
+//! that result, not only on the original requested name. `Sandbox::rename`
+//! applies the same check to **both** source and destination.
 
 use crate::SandboxError;
 use std::io;

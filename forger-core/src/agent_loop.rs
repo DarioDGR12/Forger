@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_MAX_STEPS: usize = 20;
-const DEFAULT_SYSTEM_PROMPT: &str = "You are Forger, a coding agent. Use list_dir and grep to explore, read_file to inspect, edit_file for targeted patches, and write_file only for new files. run_command is for builds and tests, not for reading files. Never exfiltrate secrets; .env/.git/.ssh/credentials are blocked unless the user explicitly overrides the denylist.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are Forger, a coding agent. Use list_dir and grep to explore, read_file to inspect, edit_file for targeted patches, write_file only for new files, and rename_file to rename. run_command is for builds and tests, not for reading or renaming files. Never exfiltrate secrets; .env/.git/.ssh/credentials are blocked unless the user explicitly overrides the denylist.";
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
@@ -148,7 +148,10 @@ impl AgentLoop {
         }
 
         let reason = finish.unwrap_or(FinishReason::Stop);
-        let calls: Vec<ToolCall> = builders.into_iter().filter_map(|b| b.into_tool_call()).collect();
+        let calls: Vec<ToolCall> = builders
+            .into_iter()
+            .filter_map(|b| b.into_tool_call())
+            .collect();
         Ok((text, calls, reason))
     }
 
