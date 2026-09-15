@@ -148,7 +148,14 @@ async fn main() -> Result<()> {
             let tools = tools.clone();
             let approver = approver.clone();
             let config = config.clone();
-            move || AgentLoop::new(provider.clone(), tools.clone(), approver.clone(), config.clone())
+            move || {
+                AgentLoop::new(
+                    provider.clone(),
+                    tools.clone(),
+                    approver.clone(),
+                    config.clone(),
+                )
+            }
         };
         let runner = QualityRunner::new(provider, qcfg);
         let cancel = CancellationToken::new();
@@ -156,7 +163,8 @@ async fn main() -> Result<()> {
         let (session, report) = runner.run(make, &task, cancel).await?;
         println!(
             "quality: winner candidate {} / {}",
-            report.winner_index, report.candidates.len()
+            report.winner_index,
+            report.candidates.len()
         );
         for c in &report.candidates {
             println!("  [{}] score {} — {}", c.index, c.score, c.rationale);
@@ -187,12 +195,7 @@ async fn main() -> Result<()> {
             _ => {}
         };
         let outcome = agent
-            .run_turn(
-                &mut session,
-                UserTurn { text: msg },
-                cancel,
-                &mut sink,
-            )
+            .run_turn(&mut session, UserTurn { text: msg }, cancel, &mut sink)
             .await?;
         if outcome == TurnOutcome::StepLimit {
             eprintln!("stopped: max turns reached (tool results from the last turn were kept)");

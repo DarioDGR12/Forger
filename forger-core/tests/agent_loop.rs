@@ -52,11 +52,14 @@ impl Provider for ScriptedProvider {
         let next = {
             let mut g = self.scripts.lock().unwrap();
             if g.is_empty() {
-                vec![Ok(StreamEvent::TextDelta {
-                    text: "default".into(),
-                }), Ok(StreamEvent::Finished {
-                    reason: FinishReason::Stop,
-                })]
+                vec![
+                    Ok(StreamEvent::TextDelta {
+                        text: "default".into(),
+                    }),
+                    Ok(StreamEvent::Finished {
+                        reason: FinishReason::Stop,
+                    }),
+                ]
             } else {
                 g.remove(0)
             }
@@ -129,9 +132,7 @@ fn loop_with(
 
 fn text_then(text: &str) -> Vec<Result<StreamEvent, ProviderError>> {
     vec![
-        Ok(StreamEvent::TextDelta {
-            text: text.into(),
-        }),
+        Ok(StreamEvent::TextDelta { text: text.into() }),
         Ok(StreamEvent::Finished {
             reason: FinishReason::Stop,
         }),
@@ -161,9 +162,7 @@ async fn run(
     agent
         .run_turn(
             session,
-            UserTurn {
-                text: text.into(),
-            },
+            UserTurn { text: text.into() },
             CancellationToken::new(),
             &mut sink,
         )
@@ -173,10 +172,14 @@ async fn run(
 #[tokio::test]
 async fn end_to_end_turn_against_scripted_provider() {
     let provider = ScriptedProvider::new(vec![text_then("hello from mock")]);
-    let agent = loop_with(provider, ToolRegistry::new(), AutoApprover {
-        allow_sensitive: true,
-        allow_denylist: false,
-    });
+    let agent = loop_with(
+        provider,
+        ToolRegistry::new(),
+        AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        },
+    );
     let mut session = Session::new();
     let outcome = run(&agent, &mut session, "hi").await.unwrap();
     assert_eq!(outcome, TurnOutcome::Completed);
@@ -219,9 +222,7 @@ async fn streaming_emits_text_deltas() {
         agent
             .run_turn(
                 &mut session,
-                UserTurn {
-                    text: "go".into(),
-                },
+                UserTurn { text: "go".into() },
                 CancellationToken::new(),
                 &mut sink,
             )
@@ -240,10 +241,14 @@ async fn malformed_tool_call_does_not_panic_and_continues() {
     ]);
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(EchoTool));
-    let agent = loop_with(provider, tools, AutoApprover {
-        allow_sensitive: true,
-        allow_denylist: false,
-    });
+    let agent = loop_with(
+        provider,
+        tools,
+        AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        },
+    );
     let mut session = Session::new();
     run(&agent, &mut session, "call it").await.unwrap();
     let tool_msg = session
@@ -301,7 +306,11 @@ async fn sensitive_tool_denied_without_approval() {
 #[tokio::test]
 async fn denylist_layer_is_independent_of_sensitive_yes() {
     let provider = ScriptedProvider::new(vec![
-        tool_call("c1", "write_file", r#"{"path":".env","contents":"SECRET=1"}"#),
+        tool_call(
+            "c1",
+            "write_file",
+            r#"{"path":".env","contents":"SECRET=1"}"#,
+        ),
         text_then("blocked"),
     ]);
     let mut tools = ToolRegistry::new();
@@ -332,9 +341,7 @@ async fn denylist_layer_is_independent_of_sensitive_yes() {
 #[tokio::test]
 async fn cancel_mid_stream_leaves_session_reusable() {
     let provider = ScriptedProvider::new(vec![vec![
-        Ok(StreamEvent::TextDelta {
-            text: "aaa".into(),
-        }),
+        Ok(StreamEvent::TextDelta { text: "aaa".into() }),
         Ok(StreamEvent::Finished {
             reason: FinishReason::Stop,
         }),
@@ -347,9 +354,7 @@ async fn cancel_mid_stream_leaves_session_reusable() {
     let outcome = agent
         .run_turn(
             &mut session,
-            UserTurn {
-                text: "hi".into(),
-            },
+            UserTurn { text: "hi".into() },
             cancel,
             &mut sink,
         )
@@ -392,10 +397,14 @@ async fn cancel_after_tool_calls_still_writes_tool_results() {
     let provider = ScriptedProvider::new(vec![tool_call("c1", "hang", "{}")]);
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(HangTool));
-    let agent = loop_with(provider, tools, AutoApprover {
-        allow_sensitive: true,
-        allow_denylist: false,
-    });
+    let agent = loop_with(
+        provider,
+        tools,
+        AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        },
+    );
     let mut session = Session::new();
     let cancel = CancellationToken::new();
     let cancel2 = cancel.clone();
@@ -429,7 +438,8 @@ async fn cancel_after_tool_calls_still_writes_tool_results() {
         .count();
     if has_assistant_tools {
         assert_eq!(
-            tool_results, 1,
+            tool_results,
+            1,
             "committed tool_calls must have matching results: {:?}",
             session.messages()
         );

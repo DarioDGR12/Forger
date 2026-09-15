@@ -221,8 +221,14 @@ impl Sandbox for FsSandbox {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<CommandOutput, SandboxError> {
-        exec::run_command(&self.workspace, command, timeout, cancel, self.landlock_warning.as_deref())
-            .await
+        exec::run_command(
+            &self.workspace,
+            command,
+            timeout,
+            cancel,
+            self.landlock_warning.as_deref(),
+        )
+        .await
     }
 
     fn landlock_warning(&self) -> Option<String> {

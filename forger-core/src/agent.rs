@@ -13,13 +13,27 @@ pub struct UserTurn {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
-    TextDelta { text: String },
-    ToolCall { call: ToolCall },
-    ToolResult { call_id: String, name: String, output: String },
-    Warning { message: String },
-    Step { index: usize },
+    TextDelta {
+        text: String,
+    },
+    ToolCall {
+        call: ToolCall,
+    },
+    ToolResult {
+        call_id: String,
+        name: String,
+        output: String,
+    },
+    Warning {
+        message: String,
+    },
+    Step {
+        index: usize,
+    },
     Cancelled,
-    Finished { outcome: TurnOutcome },
+    Finished {
+        outcome: TurnOutcome,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
