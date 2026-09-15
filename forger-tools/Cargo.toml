@@ -6,7 +6,7 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Stock tools: read_file, write_file, edit_file, list_dir, grep, run_command"
+description = "Stock tools: read_file, write_file, edit_file, list_dir, glob, grep, git, run_command"
 
 [dependencies]
 async-trait.workspace = true
@@ -20,5 +20,6 @@ tokio-util.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+forger-providers.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

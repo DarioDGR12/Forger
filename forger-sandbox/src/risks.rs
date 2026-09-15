@@ -7,6 +7,8 @@
 //!    is refused. `run_command` that creates a *new* denylist file (e.g.
 //!    `mv config .env`) is rolled back after the command. In-place shell
 //!    edits of an existing `.env` are restored from a pre-command backup.
+//!    Known denylist-file contents (8+ bytes) are redacted from command
+//!    stdout/stderr so `cat .env` does not leak to the model.
 //!
 //! 2. **Landlock SCOPE_SIGNAL (Linux < 6.12 / ABI < 6):** a process inside
 //!    the sandbox can send `kill -9` to other processes of the same user,

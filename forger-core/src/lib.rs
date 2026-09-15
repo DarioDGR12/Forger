@@ -9,8 +9,11 @@
 pub mod agent;
 pub mod agent_loop;
 pub mod approval;
+pub mod compact;
+pub mod context;
 pub mod error;
 pub mod message;
+pub mod paths;
 pub mod plugin;
 pub mod quality;
 pub mod session;
@@ -21,6 +24,8 @@ pub use agent_loop::{AgentLoop, AgentLoopConfig};
 pub use approval::{
     ApprovalError, ApprovalKind, ApprovalRequest, Approver, AutoApprover, Decision,
 };
+pub use compact::compact_messages;
+pub use context::compose_system_prompt;
 pub use error::{AgentError, ProviderError, ToolError};
 pub use message::{FinishReason, Message, Role, StreamEvent, ToolCall};
 pub use plugin::{Plugin, PluginId, Provider};

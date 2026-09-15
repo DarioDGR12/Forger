@@ -1,15 +1,14 @@
+use crate::walk::collect_files;
 use crate::{failed, path_permit};
 use async_trait::async_trait;
 use forger_core::{Tool, ToolContext, ToolError, ToolSpec};
-use forger_sandbox::{DirEntry, Sandbox, WritePermit};
+use forger_sandbox::{Sandbox, WritePermit};
 use regex::Regex;
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
-const MAX_FILES: usize = 400;
 const MAX_MATCHES: usize = 50;
-const SKIP_DIRS: &[&str] = &["target", "node_modules", "dist", ".venv"];
 
 pub struct Grep {
     sandbox: Arc<dyn Sandbox>,
@@ -32,7 +31,7 @@ impl Tool for Grep {
                 "properties": {
                     "pattern": {"type": "string"},
                     "path": {"type": "string", "description": "File or directory to search", "default": "."},
-                    "glob": {"type": "string", "description": "Simple suffix filter, e.g. *.rs"}
+                    "glob": {"type": "string", "description": "Glob filter, e.g. *.rs or **/*.toml"}
                 },
                 "required": ["pattern"]
             }),
@@ -44,21 +43,19 @@ impl Tool for Grep {
             .get("pattern")
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::MalformedArgs("missing string field `pattern`".into()))?;
-        let re = Regex::new(pattern).map_err(|e| ToolError::MalformedArgs(format!("invalid regex: {e}")))?;
+        let re = Regex::new(pattern)
+            .map_err(|e| ToolError::MalformedArgs(format!("invalid regex: {e}")))?;
         let root = PathBuf::from(args.get("path").and_then(Value::as_str).unwrap_or("."));
         let glob = args.get("glob").and_then(Value::as_str);
 
-        let decision = self
-            .sandbox
-            .inspect(&root)
-            .map_err(|e| failed("grep", e))?;
+        let decision = self.sandbox.inspect(&root).map_err(|e| failed("grep", e))?;
         let permit = path_permit("grep", &decision, ctx.denylist_override)?;
 
         let mut files = Vec::new();
         collect_files(
             self.sandbox.as_ref(),
             &root,
-            permit.clone(),
+            permit,
             glob,
             0,
             &mut files,
@@ -99,75 +96,4 @@ impl Tool for Grep {
             Ok(hits.join("\n"))
         }
     }
-}
-
-fn glob_ok(path: &Path, glob: Option<&str>) -> bool {
-    let Some(g) = glob else {
-        return true;
-    };
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if let Some(suffix) = g.strip_prefix('*') {
-        name.ends_with(suffix)
-    } else {
-        name == g
-    }
-}
-
-fn skip_dir(name: &str) -> bool {
-    SKIP_DIRS.contains(&name)
-}
-
-async fn collect_files(
-    sandbox: &dyn Sandbox,
-    path: &Path,
-    permit: WritePermit,
-    glob: Option<&str>,
-    depth: usize,
-    out: &mut Vec<PathBuf>,
-    cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(), ToolError> {
-    if out.len() >= MAX_FILES || depth > 12 {
-        return Ok(());
-    }
-    if cancel.is_cancelled() {
-        return Err(ToolError::Cancelled);
-    }
-    let entries = match sandbox.list(path, permit.clone(), cancel).await {
-        Ok(e) => e,
-        Err(_) => {
-            // Might be a file. Try as a single path.
-            if glob_ok(path, glob) {
-                out.push(path.to_path_buf());
-            }
-            return Ok(());
-        }
-    };
-    for DirEntry {
-        name,
-        path: child,
-        is_dir,
-    } in entries
-    {
-        if is_dir {
-            if skip_dir(&name) {
-                continue;
-            }
-            Box::pin(collect_files(
-                sandbox,
-                &child,
-                WritePermit::Normal,
-                glob,
-                depth + 1,
-                out,
-                cancel,
-            ))
-            .await?;
-        } else if glob_ok(&child, glob) {
-            out.push(child);
-            if out.len() >= MAX_FILES {
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
 }

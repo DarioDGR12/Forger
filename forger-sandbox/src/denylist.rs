@@ -115,6 +115,13 @@ pub fn rollback_new_sensitive(workspace: &Path, before: &HashSet<PathBuf>) -> Op
     first
 }
 
+/// Snippets shorter than this are not redacted from command output: they
+/// collide with ordinary tokens (`x=1`, `true`). Residual: a 7-byte secret
+/// in a denylist file can still appear in `run_command` stdout.
+const REDACT_MIN_LEN: usize = 8;
+
+const REDACT_PLACEHOLDER: &str = "[redacted: denylist]";
+
 /// Snapshot of denylist paths plus file-content backups, taken before
 /// `run_command` so in-place `echo >> .env` / `mv -f` can be restored.
 pub struct SensitiveGuard {
@@ -139,6 +146,11 @@ impl SensitiveGuard {
             }
         }
         Self { before, backups }
+    }
+
+    /// Bytes captured before the command (existing denylist files).
+    pub fn backup_bytes(&self) -> Vec<Vec<u8>> {
+        self.backups.values().cloned().collect()
     }
 
     /// Delete newly created sensitive paths and restore mutated existing ones.
@@ -169,6 +181,57 @@ impl SensitiveGuard {
             }
         }
         hit
+    }
+}
+
+/// Contents of denylist files currently in `workspace` (except `.git`,
+/// files over the backup cap, and directories). Used to redact `cat .env`
+/// from `run_command` stdout **before** rollback deletes a newly created
+/// secret file.
+pub fn collect_secret_bytes(workspace: &Path) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for path in snapshot_sensitive(workspace) {
+        let Ok(meta) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() || meta.len() > BACKUP_MAX_BYTES {
+            continue;
+        }
+        if let Ok(bytes) = fs::read(&path) {
+            out.push(bytes);
+        }
+    }
+    out
+}
+
+/// Replace known denylist-file contents (and their long lines) in `text`.
+/// Longer snippets first so a full file is not left half-redacted.
+pub fn redact_secrets(text: &str, secrets: &[Vec<u8>]) -> String {
+    let mut snippets: Vec<String> = Vec::new();
+    for bytes in secrets {
+        let Ok(s) = std::str::from_utf8(bytes) else {
+            continue;
+        };
+        push_redact_snippet(&mut snippets, s);
+        for line in s.lines() {
+            push_redact_snippet(&mut snippets, line);
+        }
+    }
+    snippets.sort_by_key(|s| std::cmp::Reverse(s.len()));
+    snippets.dedup();
+    let mut out = text.to_string();
+    for snip in snippets {
+        if out.contains(&snip) {
+            out = out.replace(&snip, REDACT_PLACEHOLDER);
+        }
+    }
+    out
+}
+
+fn push_redact_snippet(out: &mut Vec<String>, raw: &str) {
+    let trimmed = raw.trim();
+    if trimmed.len() >= REDACT_MIN_LEN {
+        out.push(trimmed.to_string());
     }
 }
 
@@ -239,5 +302,24 @@ mod tests {
         let hit = guard.restore_and_rollback(ws).unwrap();
         assert_eq!(hit.pattern, ".env");
         assert_eq!(fs::read_to_string(ws.join(".env")).unwrap(), "SECRET=1\n");
+    }
+
+    #[test]
+    fn redact_replaces_long_secret_lines() {
+        use super::redact_secrets;
+        let secret = b"API_KEY=sk-super-secret-value-do-not-leak\n".to_vec();
+        let out = redact_secrets(
+            "stdout:\nAPI_KEY=sk-super-secret-value-do-not-leak\n",
+            &[secret],
+        );
+        assert!(!out.contains("sk-super-secret"));
+        assert!(out.contains("[redacted: denylist]"));
+    }
+
+    #[test]
+    fn redact_skips_tiny_snippets() {
+        use super::redact_secrets;
+        let out = redact_secrets("true", &[b"true".to_vec()]);
+        assert_eq!(out, "true");
     }
 }

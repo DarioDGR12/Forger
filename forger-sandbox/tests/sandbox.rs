@@ -323,6 +323,54 @@ async fn shell_append_to_existing_env_is_restored() {
 }
 
 #[tokio::test]
+async fn cat_env_is_redacted_from_stdout() {
+    let (dir, sb) = sandbox();
+    fs::write(
+        dir.path().join(".env"),
+        "API_KEY=sk-super-secret-value-do-not-leak\n",
+    )
+    .unwrap();
+    let out = sb
+        .run(
+            "cat .env",
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+    assert!(
+        !out.stdout.contains("sk-super-secret"),
+        "secret leaked in stdout: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("[redacted: denylist]"),
+        "expected redaction placeholder, got {}",
+        out.stdout
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "API_KEY=sk-super-secret-value-do-not-leak\n"
+    );
+}
+
+#[tokio::test]
+async fn echo_hello_is_not_redacted() {
+    let (_dir, sb) = sandbox();
+    let out = sb
+        .run(
+            "echo hello",
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert!(out.stdout.contains("hello"));
+    assert!(!out.stdout.contains("[redacted: denylist]"));
+}
+
+#[tokio::test]
 async fn list_of_git_dir_is_blocked() {
     let (dir, sb) = sandbox();
     fs::create_dir(dir.path().join(".git")).unwrap();

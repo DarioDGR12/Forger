@@ -39,6 +39,10 @@ struct Cli {
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
 
+    /// Resume a saved session (`{workspace}/.forger/sessions/{id}.json`)
+    #[arg(long)]
+    session: Option<String>,
+
     /// mock | openai-compat (default: openai-compat if an API key is set, else mock)
     #[arg(long, value_enum)]
     provider: Option<ProviderKind>,
@@ -127,10 +131,7 @@ async fn main() -> Result<()> {
         })
     };
 
-    let config = AgentLoopConfig {
-        workspace: workspace.clone(),
-        ..AgentLoopConfig::default()
-    };
+    let config = AgentLoopConfig::for_workspace(workspace.clone());
 
     if cli.quality {
         if cli.quality_n == 0 || cli.quality_n > 3 {
@@ -148,15 +149,24 @@ async fn main() -> Result<()> {
             let tools = tools.clone();
             let approver = approver.clone();
             let config = config.clone();
-            move || AgentLoop::new(provider.clone(), tools.clone(), approver.clone(), config.clone())
+            move || {
+                AgentLoop::new(
+                    provider.clone(),
+                    tools.clone(),
+                    approver.clone(),
+                    config.clone(),
+                )
+            }
         };
         let runner = QualityRunner::new(provider, qcfg);
         let cancel = CancellationToken::new();
         ctrlc_cancel(cancel.clone());
         let (session, report) = runner.run(make, &task, cancel).await?;
+        let _ = session.save_to(&workspace);
         println!(
             "quality: winner candidate {} / {}",
-            report.winner_index, report.candidates.len()
+            report.winner_index,
+            report.candidates.len()
         );
         for c in &report.candidates {
             println!("  [{}] score {} — {}", c.index, c.score, c.rationale);
@@ -169,7 +179,7 @@ async fn main() -> Result<()> {
 
     if let Some(msg) = cli.message {
         let agent = AgentLoop::new(provider, tools, approver, config);
-        let mut session = Session::new();
+        let mut session = load_or_new_session(&workspace, cli.session.as_deref())?;
         let cancel = CancellationToken::new();
         ctrlc_cancel(cancel.clone());
         let mut sink = |ev: AgentEvent| match ev {
@@ -187,18 +197,24 @@ async fn main() -> Result<()> {
             _ => {}
         };
         agent
-            .run_turn(
-                &mut session,
-                UserTurn { text: msg },
-                cancel,
-                &mut sink,
-            )
+            .run_turn(&mut session, UserTurn { text: msg }, cancel, &mut sink)
             .await?;
+        if let Err(e) = session.save_to(&workspace) {
+            eprintln!("warning: could not save session: {e}");
+        }
         println!();
         return Ok(());
     }
 
-    interactive::repl(provider, tools, approver, config).await
+    interactive::repl(provider, tools, approver, config, cli.session).await
+}
+
+fn load_or_new_session(workspace: &std::path::Path, id: Option<&str>) -> Result<Session> {
+    match id {
+        None => Ok(Session::new()),
+        Some(id) => Session::load_from_str(workspace, id)
+            .with_context(|| format!("resume session `{id}` from {}", workspace.display())),
+    }
 }
 
 fn is_loopback(bind: &str) -> bool {
