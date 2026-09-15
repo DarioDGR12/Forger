@@ -13,10 +13,10 @@ propio loop del agente se intercambian en tiempo de composición, sin tocar
 
 | Crate | Qué es |
 |---|---|
-| `forger-core` | `Message` / `StreamEvent`, traits `Provider` y `Tool`, `AgentLoop`, modo `quality` |
-| `forger-sandbox` | Denylist de paths, resolución del path **final**, Landlock, timeout de comandos |
+| `forger-core` | `Message` / `StreamEvent`, traits `Provider` y `Tool`, `AgentLoop`, modo `quality`, contexto (`AGENTS.md`), sesiones, compactación |
+| `forger-sandbox` | Denylist de paths, resolución del path **final**, Landlock, timeout de comandos, redactado de secretos en stdout |
 | `forger-providers` | `MockProvider` + `OpenAiCompatProvider` (DeepSeek, Ollama/llama.cpp compat, Mistral, …) |
-| `forger-tools` | `read_file`, `list_dir`, `grep`, `edit_file`, `write_file`, `rename_file`, `run_command` |
+| `forger-tools` | `read_file`, `list_dir`, `glob`, `grep`, `edit_file`, `write_file`, `rename_file`, `git`, `run_command` |
 | `forger-cli` | binario `forger` — REPL y `--message` |
 | `forger-server` | binario `forger-server` — UI local + SSE en loopback, **sin auth** |
 
@@ -31,6 +31,9 @@ export FORGER_BASE_URL=https://api.deepseek.com/v1
 export FORGER_MODEL=deepseek-chat
 cargo run -p forger-cli -- --message "lista los archivos del workspace"
 
+cargo run -p forger-cli -- --session <id> --message "sigue"
+# reanuda `{workspace}/.forger/sessions/{id}.json`
+
 cargo run -p forger-cli -- serve --port 7420
 # solo 127.0.0.1 — ver SECURITY.md
 ```
@@ -42,11 +45,20 @@ cargo run -p forger-cli -- serve --port 7420
 `--quality` corre 2 candidatos en paralelo (máximo 3) y un revisor los
 puntúa 0–10. El merge es "el mejor completo", no un merge de diffs.
 
+El REPL persiste la sesión en `.forger/sessions/`. Comandos: `/save`,
+`/sessions`, `/load <id>`, `/reset`.
+
+Antes de cada turno el loop inyecta `AGENTS.md`, `FORGER.md` y
+`.forger/rules.md` (si existen) y un árbol truncado del workspace (sin
+nombres de la denylist). Los resultados viejos de herramientas se
+compactan al enviarse al modelo; el historial en disco se queda completo.
+
 ## Decisiones que no se reabren a la ligera
 
 - Denylist de secretos: no negociable por default; dos capas independientes.
 - `forger serve` en loopback, sin autenticación. Auth de verdad o nada.
 - Riesgos aceptados y documentados en [`SECURITY.md`](SECURITY.md)
-  (rename vía shell, Landlock `SCOPE_SIGNAL` en kernels < 6.12).
+  (`.git` vía shell, Landlock `SCOPE_SIGNAL` en kernels < 6.12, secretos
+  de menos de 8 bytes en stdout).
 
 Apache-2.0. See [`LICENSE`](LICENSE).

@@ -26,11 +26,17 @@ that the shell mutated (`echo >> .env`, `mv -f`) are restored from a
 pre-command backup (files up to 1 MiB). `.git` is skipped so `git init`
 still works.
 
+Known contents of those denylist files (UTF-8 snippets of 8+ bytes) are
+redacted from `run_command` stdout/stderr, so `cat .env` does not reach
+the model. Shorter snippets are left alone so ordinary tokens are not
+blanked.
+
 ### Residual
 
-`.git` contents via the shell, denylist files larger than 1 MiB, and
-TOCTOU between the post-command scan and the next tool call. Landlock
-still cannot denylist by filename. Documented, not hidden.
+`.git` contents via the shell, denylist files larger than 1 MiB, secrets
+shorter than 8 bytes, secrets the command prints that do **not** match a
+denylist file, and TOCTOU between the post-command scan and the next tool
+call. Landlock still cannot denylist by filename. Documented, not hidden.
 
 ## Landlock `SCOPE_SIGNAL` (Linux < 6.12)
 

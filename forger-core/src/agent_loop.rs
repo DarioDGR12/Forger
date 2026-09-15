@@ -12,8 +12,11 @@
 
 use crate::agent::{emit, stream_event_to_agent, Agent, AgentEvent, TurnOutcome, UserTurn};
 use crate::approval::{ApprovalKind, ApprovalRequest, Approver, Decision};
+use crate::compact::compact_messages;
+use crate::context::compose_system_prompt;
 use crate::error::{AgentError, ProviderError, ToolError};
 use crate::message::{FinishReason, Message, StreamEvent, ToolCall};
+use crate::paths::first_denylist_pattern;
 use crate::plugin::Provider;
 use crate::session::Session;
 use crate::tool::{ToolContext, ToolRegistry};
@@ -25,7 +28,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_MAX_STEPS: usize = 20;
-const DEFAULT_SYSTEM_PROMPT: &str = "You are Forger, a coding agent. Use list_dir and grep to explore, read_file to inspect, edit_file for targeted patches, write_file only for new files, and rename_file to rename. run_command is for builds and tests, not for reading or renaming files. Never exfiltrate secrets; .env/.git/.ssh/credentials are blocked unless the user explicitly overrides the denylist.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are Forger, a coding agent. Explore with glob, list_dir, and grep. Inspect with read_file. Patch with edit_file; write_file only for new files; rename_file to rename. git is for status/diff/log (commit via run_command). run_command is for builds and tests, not for reading, grepping, or renaming files. Follow AGENTS.md / FORGER.md / .forger/rules.md when present. Never exfiltrate secrets; .env/.git/.ssh/credentials are blocked unless the user explicitly overrides the denylist.";
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {
@@ -40,6 +43,19 @@ impl Default for AgentLoopConfig {
             system_prompt: DEFAULT_SYSTEM_PROMPT.into(),
             max_steps: DEFAULT_MAX_STEPS,
             workspace: PathBuf::from("."),
+        }
+    }
+}
+
+impl AgentLoopConfig {
+    /// Default loop config with project rules and a truncated workspace tree
+    /// injected into the system prompt.
+    pub fn for_workspace(workspace: impl Into<PathBuf>) -> Self {
+        let workspace = workspace.into();
+        Self {
+            system_prompt: compose_system_prompt(&workspace, DEFAULT_SYSTEM_PROMPT),
+            max_steps: DEFAULT_MAX_STEPS,
+            workspace,
         }
     }
 }
@@ -73,7 +89,7 @@ impl AgentLoop {
     fn model_messages(&self, session: &Session) -> Vec<Message> {
         let mut out = Vec::with_capacity(session.len() + 1);
         out.push(Message::system(&self.config.system_prompt));
-        out.extend(session.messages().iter().cloned());
+        out.extend(compact_messages(session.messages()));
         out
     }
 
@@ -232,10 +248,7 @@ impl AgentLoop {
             }
         }
 
-        let denylist_hit = args
-            .get("path")
-            .and_then(Value::as_str)
-            .and_then(denylist_hint);
+        let denylist_hit = denylist_hit_from_args(&args);
         let mut denylist_override = false;
         if let Some((path, reason)) = denylist_hit {
             match self
@@ -294,29 +307,23 @@ impl AgentLoop {
 /// invoking the tool. The sandbox still resolves the *final* path (symlinks,
 /// `..`) independently — this is the generic layer, not the sandbox layer.
 pub(crate) fn denylist_hint(path: &str) -> Option<(PathBuf, String)> {
-    let lower = path.replace('\\', "/").to_ascii_lowercase();
-    let patterns = [".env", ".git", ".ssh", "credentials"];
-    for pat in patterns {
-        if path_looks_like(&lower, pat) {
-            return Some((
-                PathBuf::from(path),
-                format!("path `{path}` matches denylist pattern `{pat}`"),
-            ));
+    first_denylist_pattern(path).map(|pat| {
+        (
+            PathBuf::from(path),
+            format!("path `{path}` matches denylist pattern `{pat}`"),
+        )
+    })
+}
+
+fn denylist_hit_from_args(args: &Value) -> Option<(PathBuf, String)> {
+    for key in ["path", "from", "to"] {
+        if let Some(s) = args.get(key).and_then(Value::as_str) {
+            if let Some(hit) = denylist_hint(s) {
+                return Some(hit);
+            }
         }
     }
     None
-}
-
-fn path_looks_like(lower: &str, pat: &str) -> bool {
-    lower.split('/').any(|comp| {
-        if pat == ".env" {
-            comp == ".env" || comp.starts_with(".env.")
-        } else if pat == "credentials" {
-            comp == "credentials" || comp.ends_with("credentials")
-        } else {
-            comp == pat
-        }
-    })
 }
 
 #[derive(Default)]
@@ -415,16 +422,16 @@ impl AgentLoop {
 
 #[cfg(test)]
 mod tests {
-    use super::path_looks_like;
+    use super::denylist_hint;
 
     #[test]
     fn denylist_hint_matches_env_and_git() {
-        assert!(path_looks_like(".env", ".env"));
-        assert!(path_looks_like("foo/.env.local", ".env"));
-        assert!(path_looks_like("src/.git/config", ".git"));
-        assert!(path_looks_like(".ssh/id_rsa", ".ssh"));
-        assert!(path_looks_like(".aws/credentials", "credentials"));
-        assert!(!path_looks_like("src/main.rs", ".env"));
-        assert!(!path_looks_like("env.txt", ".env"));
+        assert!(denylist_hint(".env").is_some());
+        assert!(denylist_hint("foo/.env.local").is_some());
+        assert!(denylist_hint("src/.git/config").is_some());
+        assert!(denylist_hint(".ssh/id_rsa").is_some());
+        assert!(denylist_hint(".aws/credentials").is_some());
+        assert!(denylist_hint("src/main.rs").is_none());
+        assert!(denylist_hint("env.txt").is_none());
     }
 }

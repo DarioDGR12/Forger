@@ -72,15 +72,21 @@ pub async fn repl(
     tools: ToolRegistry,
     approver: Arc<dyn Approver>,
     config: AgentLoopConfig,
+    resume: Option<String>,
 ) -> Result<()> {
+    let workspace = config.workspace.clone();
     let agent = AgentLoop::new(provider, tools, approver, config);
-    let mut session = Session::new();
+    let mut session = match resume.as_deref() {
+        Some(id) => Session::load_from_str(&workspace, id)?,
+        None => Session::new(),
+    };
     println!(
         "Forger 0.1 — session {}. Ctrl+C cancels a turn; /quit exits.",
         session.id
     );
-    println!("Commands: /quit  /reset  /help");
+    println!("Commands: /quit  /reset  /save  /sessions  /load <id>  /help");
     println!("(no API key → MockProvider. Set FORGER_API_KEY for openai-compat.)");
+    println!("Sessions are saved under .forger/sessions/");
 
     let stdin = io::stdin();
     loop {
@@ -102,8 +108,41 @@ pub async fn repl(
                 println!("new session {}", session.id);
                 continue;
             }
+            "/save" => {
+                match session.save_to(&workspace) {
+                    Ok(p) => println!("saved {}", p.display()),
+                    Err(e) => eprintln!("save failed: {e}"),
+                }
+                continue;
+            }
+            "/sessions" => {
+                match Session::list_saved(&workspace) {
+                    Ok(ids) if ids.is_empty() => println!("(no saved sessions)"),
+                    Ok(ids) => {
+                        for id in ids {
+                            println!("{id}");
+                        }
+                    }
+                    Err(e) => eprintln!("list failed: {e}"),
+                }
+                continue;
+            }
+            line if line.starts_with("/load ") => {
+                let id = line.trim_start_matches("/load ").trim();
+                match Session::load_from_str(&workspace, id) {
+                    Ok(s) => {
+                        session = s;
+                        println!("loaded session {} ({} messages)", session.id, session.len());
+                    }
+                    Err(e) => eprintln!("load failed: {e}"),
+                }
+                continue;
+            }
             "/help" => {
-                println!("Type a task. /reset starts a new session. /quit exits.");
+                println!(
+                    "Type a task. /reset starts a new session. /save writes .forger/sessions/."
+                );
+                println!("/sessions lists ids. /load <id> resumes. /quit exits.");
                 println!("Ctrl+C during a turn cancels without corrupting the session.");
                 continue;
             }
@@ -145,7 +184,12 @@ pub async fn repl(
             )
             .await
         {
-            Ok(_) => println!(),
+            Ok(_) => {
+                println!();
+                if let Err(e) = session.save_to(&workspace) {
+                    eprintln!("warning: could not save session: {e}");
+                }
+            }
             Err(e) => eprintln!("\nerror: {e}"),
         }
         ctrlc.abort();

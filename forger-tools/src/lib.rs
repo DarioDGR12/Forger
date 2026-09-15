@@ -2,14 +2,20 @@
 //! so the agent loop never depends on a filesystem backend.
 
 mod edit_file;
+mod git;
+mod glob;
 mod grep;
 mod list_dir;
+mod pattern;
 mod read_file;
 mod rename_file;
 mod run_command;
+mod walk;
 mod write_file;
 
 pub use edit_file::EditFile;
+pub use git::Git;
+pub use glob::Glob;
 pub use grep::Grep;
 pub use list_dir::ListDir;
 pub use read_file::ReadFile;
@@ -26,10 +32,12 @@ pub fn stock_tools(sandbox: Arc<dyn Sandbox>, run_timeout: Duration) -> ToolRegi
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(ReadFile::new(sandbox.clone())));
     reg.register(Arc::new(ListDir::new(sandbox.clone())));
+    reg.register(Arc::new(Glob::new(sandbox.clone())));
     reg.register(Arc::new(Grep::new(sandbox.clone())));
     reg.register(Arc::new(EditFile::new(sandbox.clone())));
     reg.register(Arc::new(WriteFile::new(sandbox.clone())));
     reg.register(Arc::new(RenameFile::new(sandbox.clone())));
+    reg.register(Arc::new(Git::new(sandbox.clone(), run_timeout)));
     reg.register(Arc::new(RunCommand::new(sandbox, run_timeout)));
     reg
 }

@@ -21,7 +21,7 @@ impl Tool for RunCommand {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "run_command".into(),
-            description: "Run a shell command in the workspace. Sensitive: requires confirmation. Hung commands are killed by a timeout supervisor.".into(),
+            description: "Run a shell command in the workspace. Sensitive: requires confirmation. Prefer glob/grep/read_file/git for inspection. Hung commands are killed by a timeout supervisor. Denylist file contents are redacted from output.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {

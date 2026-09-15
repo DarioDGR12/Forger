@@ -50,6 +50,29 @@ impl MockProvider {
             text: text.into(),
         })])])
     }
+
+    /// One tool call, then a final text reply. Used by evals.
+    pub fn tool_then_text(
+        call_id: impl Into<String>,
+        tool: impl Into<String>,
+        arguments: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        Self::new(vec![
+            MockScript::Events(vec![
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some(call_id.into()),
+                    name: Some(tool.into()),
+                    arguments: Some(arguments.into()),
+                }),
+                Ok(StreamEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                }),
+            ]),
+            MockScript::Text(text.into()),
+        ])
+    }
 }
 
 impl Plugin for MockProvider {
@@ -93,10 +116,7 @@ mod tests {
     #[tokio::test]
     async fn mock_emits_text_and_finish() {
         let p = MockProvider::single_text("hi");
-        let mut s = p
-            .stream(&[], &[], CancellationToken::new())
-            .await
-            .unwrap();
+        let mut s = p.stream(&[], &[], CancellationToken::new()).await.unwrap();
         let mut got = Vec::new();
         while let Some(ev) = s.next().await {
             got.push(ev.unwrap());

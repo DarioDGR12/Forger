@@ -15,7 +15,9 @@
 //! Accepted, documented risks — see [`crate::risks`]:
 //! - `run_command` cannot leave a *new* denylist file (`mv config .env`)
 //!   nor keep an in-place edit of an existing `.env`: those are rolled
-//!   back after the command. `.git` is skipped so `git init` still works.
+//!   back after the command. Known denylist file contents (8+ bytes) are
+//!   redacted from stdout/stderr so `cat .env` does not leak to the model.
+//!   `.git` is skipped so `git init` still works.
 //! - Linux kernels without Landlock ABI 6 (`SCOPE_SIGNAL`, 6.12+) can let a
 //!   sandboxed process `kill -9` other same-user processes, including Forger.
 //!   We **warn at runtime** and never pretend this is closed.
@@ -283,9 +285,19 @@ impl Sandbox for FsSandbox {
             self.landlock_warning.as_deref(),
         )
         .await;
+        // Capture secret bytes *before* rollback so a `mv config .env && cat .env`
+        // cannot leak the new file through stdout, then restore mutations.
+        let mut secrets = before.backup_bytes();
+        secrets.extend(denylist::collect_secret_bytes(&self.workspace));
+        let hit = before.restore_and_rollback(&self.workspace);
+        let result = result.map(|mut out| {
+            out.stdout = denylist::redact_secrets(&out.stdout, &secrets);
+            out.stderr = denylist::redact_secrets(&out.stderr, &secrets);
+            out
+        });
         // Shell `mv config .env` and `echo >> .env` are not visible to
         // write/rename. Restore/delete so those mutations do not stick.
-        if let Some(hit) = before.restore_and_rollback(&self.workspace) {
+        if let Some(hit) = hit {
             return Err(SandboxError::Denylist {
                 path: hit.path.display().to_string(),
                 pattern: hit.pattern,

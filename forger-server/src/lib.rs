@@ -96,10 +96,22 @@ async fn new_session(
     Json(body): Json<NewSessionBody>,
 ) -> impl IntoResponse {
     if let Some(id) = body.resume {
-        Json(serde_json::json!({"id": id}))
+        if let Ok(s) = Session::load_from_str(&state.workspace, &id) {
+            let sid = s.id.to_string();
+            state.sessions.lock().await.insert(
+                sid.clone(),
+                SessionSlot {
+                    session: s,
+                    busy: false,
+                },
+            );
+            return Json(serde_json::json!({"id": sid})).into_response();
+        }
+        Json(serde_json::json!({"id": id})).into_response()
     } else {
         let s = Session::new();
         let id = s.id.to_string();
+        let _ = s.save_to(&state.workspace);
         state.sessions.lock().await.insert(
             id.clone(),
             SessionSlot {
@@ -107,7 +119,7 @@ async fn new_session(
                 busy: false,
             },
         );
-        Json(serde_json::json!({"id": id}))
+        Json(serde_json::json!({"id": id})).into_response()
     }
 }
 
@@ -133,16 +145,18 @@ async fn turn_sse(
     tokio::spawn(async move {
         let result = run_one_turn(workspace, sessions, body, tx.clone(), cancel_task).await;
         if let Err(e) = result {
-            let _ = tx.send(serde_json::json!({"type":"error","message": e.to_string()}).to_string());
+            let _ =
+                tx.send(serde_json::json!({"type":"error","message": e.to_string()}).to_string());
         }
         let _ = tx.send(serde_json::json!({"type":"done"}).to_string());
     });
 
-    let stream = futures::stream::unfold((rx, CancelOnDrop(cancel)), |(mut rx, guard)| async move {
-        rx.recv()
-            .await
-            .map(|data| (Ok(Event::default().data(data)), (rx, guard)))
-    });
+    let stream =
+        futures::stream::unfold((rx, CancelOnDrop(cancel)), |(mut rx, guard)| async move {
+            rx.recv()
+                .await
+                .map(|data| (Ok(Event::default().data(data)), (rx, guard)))
+        });
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
@@ -154,10 +168,12 @@ async fn run_one_turn(
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut map = sessions.lock().await;
-    let slot = map.entry(body.session_id.clone()).or_insert_with(|| SessionSlot {
-        session: Session::new(),
-        busy: false,
-    });
+    let slot = map
+        .entry(body.session_id.clone())
+        .or_insert_with(|| SessionSlot {
+            session: Session::load_or_create(&workspace, &body.session_id),
+            busy: false,
+        });
     if slot.busy {
         drop(map);
         anyhow::bail!("session {} is already running a turn", body.session_id);
@@ -172,6 +188,7 @@ async fn run_one_turn(
     if let Some(slot) = map.get_mut(&body.session_id) {
         slot.session = local;
         slot.busy = false;
+        let _ = slot.session.save_to(&workspace);
     }
     result
 }
@@ -202,10 +219,7 @@ async fn execute_turn(
         provider,
         tools,
         approver,
-        AgentLoopConfig {
-            workspace: workspace.to_path_buf(),
-            ..AgentLoopConfig::default()
-        },
+        AgentLoopConfig::for_workspace(workspace.to_path_buf()),
     );
 
     let mut sink = |ev: AgentEvent| {
@@ -338,7 +352,12 @@ mod tests {
         let (_dir, state) = test_harness();
         let app = app(state);
         let res = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
