@@ -149,7 +149,10 @@ async fn main() -> Result<()> {
                 let _ = io::stdout().flush();
             }
             AgentEvent::ToolCall { call } => {
-                eprintln!("\n[{}] → tool {} {}", ev.candidate, call.name, call.arguments)
+                eprintln!(
+                    "\n[{}] → tool {} {}",
+                    ev.candidate, call.name, call.arguments
+                )
             }
             AgentEvent::ToolResult { name, output, .. } => {
                 let preview: String = output.chars().take(200).collect();
@@ -173,7 +176,8 @@ async fn main() -> Result<()> {
         println!();
         println!(
             "quality: winner candidate {} / {}",
-            report.winner_index, report.candidates.len()
+            report.winner_index,
+            report.candidates.len()
         );
         for c in &report.candidates {
             println!("  [{}] score {} — {}", c.index, c.score, c.rationale);
@@ -204,12 +208,7 @@ async fn main() -> Result<()> {
             _ => {}
         };
         agent
-            .run_turn(
-                &mut session,
-                UserTurn { text: msg },
-                cancel,
-                &mut sink,
-            )
+            .run_turn(&mut session, UserTurn { text: msg }, cancel, &mut sink)
             .await?;
         println!();
         return Ok(());

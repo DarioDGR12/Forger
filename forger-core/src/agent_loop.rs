@@ -152,7 +152,10 @@ impl AgentLoop {
         }
 
         let reason = finish.unwrap_or(FinishReason::Stop);
-        let calls: Vec<ToolCall> = builders.into_iter().filter_map(|b| b.into_tool_call()).collect();
+        let calls: Vec<ToolCall> = builders
+            .into_iter()
+            .filter_map(|b| b.into_tool_call())
+            .collect();
         Ok((text, calls, reason))
     }
 

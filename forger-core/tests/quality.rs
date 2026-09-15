@@ -170,15 +170,10 @@ async fn quality_candidates_overlap_on_shared_provider() {
     );
 
     let started = Instant::now();
-    let (_session, report) = forger_core::run_quality_turn(
-        agent,
-        reviewer,
-        "do the thing",
-        2,
-        CancellationToken::new(),
-    )
-    .await
-    .unwrap();
+    let (_session, report) =
+        forger_core::run_quality_turn(agent, reviewer, "do the thing", 2, CancellationToken::new())
+            .await
+            .unwrap();
     let elapsed = started.elapsed();
 
     let max = shared
