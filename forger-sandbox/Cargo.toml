@@ -1,0 +1,26 @@
+[package]
+name = "forger-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Execution sandbox: path denylist, final-path resolution, Landlock, command timeouts"
+
+[dependencies]
+async-trait.workspace = true
+forger-core.workspace = true
+libc.workspace = true
+nix.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
