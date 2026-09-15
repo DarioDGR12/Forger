@@ -20,15 +20,16 @@ final path (and on a full canonicalize if the target already exists). So
 `write("config")` then `rename(".env")` is blocked, as is `innocent → .env`.
 
 After `run_command`, the workspace is re-scanned. Newly created denylist
-files (the `mv config .env` case) are deleted and the command is reported
-as blocked. `.git` is skipped so `git init` still works.
+files (the `mv config .env` case) are deleted. Existing denylist files
+that the shell mutated (`echo >> .env`, `mv -f`) are restored from a
+pre-command backup (files up to 1 MiB). `.git` is skipped so `git init`
+still works.
 
-### Residual gap: overwrite / in-place shell edits
+### Residual
 
-If `.env` already exists, `run_command` can still `mv -f tmp .env` or
-`echo secret >> .env`. Detecting that without snapshots of file contents is
-a different problem (and Landlock cannot denylist by filename). Documented,
-not hidden.
+`.git` contents via the shell, denylist files larger than 1 MiB, and
+TOCTOU between the post-command scan and the next tool call. Landlock
+still cannot denylist by filename. Documented, not hidden.
 
 ## Landlock `SCOPE_SIGNAL` (Linux < 6.12)
 

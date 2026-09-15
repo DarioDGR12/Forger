@@ -13,10 +13,9 @@
 //!    supervisor in the parent so a hung process cannot stall the agent loop.
 //!
 //! Accepted, documented risks — see [`crate::risks`]:
-//! - Filename denylist cannot see every mutation a shell performs (in-place
-//!   edits of an *existing* `.env`, or `mv` over a file that was already
-//!   denylisted). New sensitive files created by `run_command` (e.g.
-//!   `mv config .env`) are detected and removed after the command.
+//! - `run_command` cannot leave a *new* denylist file (`mv config .env`)
+//!   nor keep an in-place edit of an existing `.env`: those are rolled
+//!   back after the command. `.git` is skipped so `git init` still works.
 //! - Linux kernels without Landlock ABI 6 (`SCOPE_SIGNAL`, 6.12+) can let a
 //!   sandboxed process `kill -9` other same-user processes, including Forger.
 //!   We **warn at runtime** and never pretend this is closed.
@@ -278,7 +277,7 @@ impl Sandbox for FsSandbox {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<CommandOutput, SandboxError> {
-        let before = denylist::snapshot_sensitive(&self.workspace);
+        let before = denylist::SensitiveGuard::capture(&self.workspace);
         let result = exec::run_command(
             &self.workspace,
             command,
@@ -287,10 +286,9 @@ impl Sandbox for FsSandbox {
             self.landlock_warning.as_deref(),
         )
         .await;
-        // Shell `mv config .env` is not visible to write/rename. Re-scan and
-        // delete newly created denylist files so the documented rename bypass
-        // does not land on disk.
-        if let Some(hit) = denylist::rollback_new_sensitive(&self.workspace, &before) {
+        // Shell `mv config .env` and `echo >> .env` are not visible to
+        // write/rename. Restore/delete so those mutations do not stick.
+        if let Some(hit) = before.restore_and_rollback(&self.workspace) {
             return Err(SandboxError::Denylist {
                 path: hit.path.display().to_string(),
                 pattern: hit.pattern,
@@ -324,15 +322,17 @@ impl Sandbox for FsSandbox {
                 return Err(SandboxError::Cancelled);
             }
             let p = ent.path();
-            if denylist::check(&p).is_some() {
+            if denylist::is_sensitive(&p) {
                 continue;
+            }
+            if let Ok(real) = std::fs::canonicalize(&p) {
+                if denylist::is_sensitive(&real) {
+                    continue;
+                }
             }
             let name = ent.file_name().to_string_lossy().into_owned();
             let is_dir = ent.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-            let rel = p
-                .strip_prefix(&self.workspace)
-                .unwrap_or(&p)
-                .to_path_buf();
+            let rel = p.strip_prefix(&self.workspace).unwrap_or(&p).to_path_buf();
             out.push(DirEntry {
                 name,
                 path: rel,

@@ -7,9 +7,11 @@
 //! - `credentials` (e.g. `.aws/credentials`, `.git-credentials`)
 
 use crate::DenylistHit;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const BACKUP_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Lexical denylist. Does **not** follow symlinks — callers must also run
 /// this on the canonical destination (`canonicalize(parent)` + file name).
@@ -63,8 +65,9 @@ fn walk_sensitive(workspace: &Path, dir: &Path, out: &mut HashSet<PathBuf>) {
             continue;
         }
         if is_sensitive(rel) || is_sensitive(&path) {
-            out.insert(path);
-            continue;
+            out.insert(path.clone());
+            // Keep walking directories so a new file inside an existing `.ssh`
+            // is visible to the post-command rollback.
         }
         let Ok(ft) = entry.file_type() else {
             continue;
@@ -110,6 +113,63 @@ pub fn rollback_new_sensitive(workspace: &Path, before: &HashSet<PathBuf>) -> Op
         remove_any(path);
     }
     first
+}
+
+/// Snapshot of denylist paths plus file-content backups, taken before
+/// `run_command` so in-place `echo >> .env` / `mv -f` can be restored.
+pub struct SensitiveGuard {
+    before: HashSet<PathBuf>,
+    backups: HashMap<PathBuf, Vec<u8>>,
+}
+
+impl SensitiveGuard {
+    /// Capture sensitive paths (except `.git`) and the contents of small files.
+    pub fn capture(workspace: &Path) -> Self {
+        let before = snapshot_sensitive(workspace);
+        let mut backups = HashMap::new();
+        for path in &before {
+            let Ok(meta) = fs::symlink_metadata(path) else {
+                continue;
+            };
+            if meta.is_dir() || meta.len() > BACKUP_MAX_BYTES {
+                continue;
+            }
+            if let Ok(bytes) = fs::read(path) {
+                backups.insert(path.clone(), bytes);
+            }
+        }
+        Self { before, backups }
+    }
+
+    /// Delete newly created sensitive paths and restore mutated existing ones.
+    pub fn restore_and_rollback(self, workspace: &Path) -> Option<DenylistHit> {
+        let mut hit = rollback_new_sensitive(workspace, &self.before);
+        for (path, bytes) in self.backups {
+            let changed = match fs::read(&path) {
+                Ok(now) => now != bytes,
+                Err(_) => true,
+            };
+            if !changed {
+                continue;
+            }
+            if let Err(err) = fs::write(&path, &bytes) {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "failed to restore sensitive file mutated by run_command"
+                );
+            } else {
+                tracing::warn!(
+                    path = %path.display(),
+                    "restored sensitive file mutated by run_command"
+                );
+            }
+            if hit.is_none() {
+                hit = check(&path);
+            }
+        }
+        hit
+    }
 }
 
 fn match_component(lower: &str) -> Option<&'static str> {
@@ -165,5 +225,19 @@ mod tests {
         let hit = rollback_new_sensitive(ws, &before).unwrap();
         assert_eq!(hit.pattern, ".env");
         assert!(!ws.join(".env").exists());
+    }
+
+    #[test]
+    fn restore_reverts_appended_dotenv() {
+        use super::SensitiveGuard;
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        fs::write(ws.join(".env"), "SECRET=1\n").unwrap();
+        let guard = SensitiveGuard::capture(ws);
+        fs::write(ws.join(".env"), "SECRET=1\npwned\n").unwrap();
+        let hit = guard.restore_and_rollback(ws).unwrap();
+        assert_eq!(hit.pattern, ".env");
+        assert_eq!(fs::read_to_string(ws.join(".env")).unwrap(), "SECRET=1\n");
     }
 }

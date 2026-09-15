@@ -236,13 +236,66 @@ async fn list_omits_denylisted_names() {
     fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
     fs::create_dir(dir.path().join(".ssh")).unwrap();
     let entries = sb
-        .list(Path::new("."), WritePermit::Normal, &CancellationToken::new())
+        .list(
+            Path::new("."),
+            WritePermit::Normal,
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"ok.txt"));
-    assert!(!names.contains(&".env"), "denylist names must not be advertised");
+    assert!(
+        !names.contains(&".env"),
+        "denylist names must not be advertised"
+    );
     assert!(!names.contains(&".ssh"));
+}
+
+#[tokio::test]
+async fn list_omits_symlink_named_config_pointing_at_env() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    symlink(dir.path().join(".env"), dir.path().join("config")).unwrap();
+    let entries = sb
+        .list(
+            Path::new("."),
+            WritePermit::Normal,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        !names.contains(&"config"),
+        "symlink to .env must not be advertised, got {names:?}"
+    );
+    assert!(!names.contains(&".env"));
+}
+
+#[tokio::test]
+async fn shell_append_to_existing_env_is_restored() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1\n").unwrap();
+    let err = sb
+        .run(
+            "printf 'pwned\\n' >> .env",
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        SandboxError::Denylist {
+            pattern: ".env",
+            ..
+        }
+    ));
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "SECRET=1\n"
+    );
 }
 
 #[tokio::test]
@@ -257,5 +310,11 @@ async fn list_of_git_dir_is_blocked() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, SandboxError::Denylist { pattern: ".git", .. }));
+    assert!(matches!(
+        err,
+        SandboxError::Denylist {
+            pattern: ".git",
+            ..
+        }
+    ));
 }
