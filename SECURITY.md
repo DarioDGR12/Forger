@@ -14,15 +14,18 @@ generic "sensitive tool" confirmation:
 - The sandbox still re-checks the resolved path and the override must match
   that path, so approving `.env` does not authorize a different target.
 
-`write_file` resolves symlinks and `..` **before** the denylist check, so
-`innocent → .env` is treated as `.env`.
+`write_file` and `Sandbox::rename` resolve the parent with
+`std::fs::canonicalize`, join the file name, and run the denylist on that
+final path (and on a full canonicalize if the target already exists). So
+`write("config")` then `rename(".env")` is blocked, as is `innocent → .env`.
 
 ### Accepted gap: shell rename
 
-A `run_command` can `echo SECRET > tmp && mv tmp .env`. Filename policy on
-`write_file` cannot see that. Closing it fully means intercepting the final
-path of every filesystem mutation inside the sandbox (Landlock is an
-allowlist of trees, not a filename denylist). Documented, not hidden.
+A `run_command` can still `echo SECRET > tmp && mv tmp .env`. Filename policy
+on the write/rename **API** cannot see mutations the shell performs. Closing
+that fully means intercepting every filesystem mutation inside the sandbox
+(Landlock is an allowlist of trees, not a filename denylist). Documented,
+not hidden.
 
 ## Landlock `SCOPE_SIGNAL` (Linux < 6.12)
 

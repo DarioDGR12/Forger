@@ -24,7 +24,13 @@ async fn write_to_env_is_blocked() {
         )
         .await
         .unwrap_err();
-    assert!(matches!(err, SandboxError::Denylist { pattern: ".env", .. }));
+    assert!(matches!(
+        err,
+        SandboxError::Denylist {
+            pattern: ".env",
+            ..
+        }
+    ));
 }
 
 #[tokio::test]
@@ -42,8 +48,63 @@ async fn write_via_symlink_to_env_is_blocked() {
         .await
         .unwrap_err();
     assert!(
-        matches!(err, SandboxError::Denylist { pattern: ".env", .. }),
+        matches!(
+            err,
+            SandboxError::Denylist {
+                pattern: ".env",
+                ..
+            }
+        ),
         "symlink must be resolved before the denylist check, got {err:?}"
+    );
+}
+
+/// Previously accepted bypass: write under a harmless name, then rename to `.env`.
+/// The destination is now canonicalized and run through `is_sensitive` / the denylist.
+#[tokio::test]
+async fn write_config_then_rename_to_env_is_blocked() {
+    let (_dir, sb) = sandbox();
+    let cancel = CancellationToken::new();
+    sb.write(
+        Path::new("config"),
+        "SECRET=1",
+        WritePermit::Normal,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert!(sb.workspace().join("config").exists());
+
+    let err = sb
+        .rename(
+            Path::new("config"),
+            Path::new(".env"),
+            WritePermit::Normal,
+            &cancel,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            SandboxError::Denylist {
+                pattern: ".env",
+                ..
+            }
+        ),
+        "rename to .env must fail as denylist, got {err:?}"
+    );
+    assert!(
+        !sb.workspace().join(".env").exists(),
+        "`.env` must not appear after a refused rename"
+    );
+    assert!(
+        sb.workspace().join("config").exists(),
+        "source `config` must still exist after a refused rename"
+    );
+    assert_eq!(
+        fs::read_to_string(sb.workspace().join("config")).unwrap(),
+        "SECRET=1"
     );
 }
 
@@ -104,7 +165,11 @@ async fn hung_command_is_killed_by_timeout_supervisor() {
 async fn echo_command_works() {
     let (_dir, sb) = sandbox();
     let out = sb
-        .run("echo hello", Duration::from_secs(5), &CancellationToken::new())
+        .run(
+            "echo hello",
+            Duration::from_secs(5),
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(out.exit_code, 0);

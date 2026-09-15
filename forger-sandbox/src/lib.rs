@@ -1,17 +1,21 @@
 //! Execution sandbox.
 //!
 //! Two independent layers:
-//! 1. Userspace denylist on the *resolved final path* (follows symlinks and
-//!    `..`) for every read/write. This is the `.env` / `.git` / `credentials`
-//!    / `.ssh` policy. It is not skipped by the generic "sensitive tool"
-//!    confirmation — that is a different [`forger_core::ApprovalKind`].
+//! 1. Userspace denylist on **both** the path the model requested **and** the
+//!    canonical destination (`std::fs::canonicalize` of the parent + file
+//!    name; full canonicalize if that path already exists). This is the
+//!    `.env` / `.git` / `credentials` / `.ssh` policy. It is not skipped by
+//!    the generic "sensitive tool" confirmation — that is a different
+//!    [`forger_core::ApprovalKind`]. [`Sandbox::rename`] uses the same gate
+//!    on the destination, so `write("config")` then `rename(".env")` is
+//!    refused.
 //! 2. Landlock confinement of `run_command` children on Linux, plus a timeout
 //!    supervisor in the parent so a hung process cannot stall the agent loop.
 //!
 //! Accepted, documented risks — see [`crate::risks`]:
 //! - Filename denylist cannot see a later `mv innocent .env` performed inside
-//!   a shell. Writes through [`Sandbox::write`] always re-resolve the final
-//!   path; shell renames remain an accepted gap.
+//!   a shell (`run_command`). Writes and renames through this crate always
+//!   re-check the canonical final path.
 //! - Linux kernels without Landlock ABI 6 (`SCOPE_SIGNAL`, 6.12+) can let a
 //!   sandboxed process `kill -9` other same-user processes, including Forger.
 //!   We **warn at runtime** and never pretend this is closed.
@@ -30,6 +34,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
+
+pub use denylist::is_sensitive;
 
 #[derive(Debug, Error)]
 pub enum SandboxError {
@@ -104,6 +110,16 @@ pub trait Sandbox: Plugin {
         cancel: &CancellationToken,
     ) -> Result<(), SandboxError>;
 
+    /// Rename `from` → `to`. The **destination** is resolved and denylisted
+    /// the same way as [`Self::write`], so moving `config` onto `.env` fails.
+    async fn rename(
+        &self,
+        from: &Path,
+        to: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<(), SandboxError>;
+
     async fn run(
         &self,
         command: &str,
@@ -152,7 +168,8 @@ impl FsSandbox {
                 path: resolved.display().to_string(),
             });
         }
-        let denylist = denylist::check(&resolved);
+        // Dual check: the name the model asked for, then the canonical dest.
+        let denylist = denylist::check(requested).or_else(|| denylist::check(&resolved));
         Ok(PathDecision { resolved, denylist })
     }
 
@@ -232,14 +249,42 @@ impl Sandbox for FsSandbox {
         Ok(())
     }
 
+    async fn rename(
+        &self,
+        from: &Path,
+        to: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<(), SandboxError> {
+        if cancel.is_cancelled() {
+            return Err(SandboxError::Cancelled);
+        }
+        let dest = self.decide(to)?;
+        self.enforce_denylist(&dest, &permit)?;
+        let src = path::resolve_final_path(&self.workspace, from)?;
+        if !path::is_inside(&self.workspace, &src) {
+            return Err(SandboxError::OutsideWorkspace {
+                path: src.display().to_string(),
+            });
+        }
+        tokio::fs::rename(&src, &dest.resolved).await?;
+        Ok(())
+    }
+
     async fn run(
         &self,
         command: &str,
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<CommandOutput, SandboxError> {
-        exec::run_command(&self.workspace, command, timeout, cancel, self.landlock_warning.as_deref())
-            .await
+        exec::run_command(
+            &self.workspace,
+            command,
+            timeout,
+            cancel,
+            self.landlock_warning.as_deref(),
+        )
+        .await
     }
 
     async fn list(
