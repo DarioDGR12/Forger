@@ -1,6 +1,7 @@
+use crate::{failed, path_permit};
 use async_trait::async_trait;
 use forger_core::{required_path, Tool, ToolContext, ToolError, ToolSpec};
-use forger_sandbox::{Sandbox, WritePermit};
+use forger_sandbox::Sandbox;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ impl Tool for WriteFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write_file".into(),
-            description: "Write a text file in the workspace. Sensitive: requires confirmation.".into(),
+            description: "Create or overwrite a text file. Sensitive: requires confirmation. Prefer edit_file for existing files.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -42,37 +43,15 @@ impl Tool for WriteFile {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::MalformedArgs("missing string field `contents`".into()))?;
 
-        let decision = self.sandbox.inspect(&path).map_err(|e| ToolError::Failed {
-            name: "write_file".into(),
-            reason: e.to_string(),
-        })?;
-
-        let permit = if let Some(hit) = &decision.denylist {
-            if ctx.denylist_override {
-                WritePermit::DenylistOverride {
-                    confirmed_resolved: decision.resolved.clone(),
-                }
-            } else {
-                return Err(ToolError::Denied {
-                    name: "write_file".into(),
-                    reason: format!(
-                        "denylist blocked `{}` (pattern `{}`); this is independent of sensitive-tool confirmation",
-                        decision.resolved.display(),
-                        hit.pattern
-                    ),
-                });
-            }
-        } else {
-            WritePermit::Normal
-        };
-
+        let decision = self
+            .sandbox
+            .inspect(&path)
+            .map_err(|e| failed("write_file", e))?;
+        let permit = path_permit("write_file", &decision, ctx.denylist_override)?;
         self.sandbox
             .write(&path, contents, permit, &ctx.cancel)
             .await
-            .map_err(|e| ToolError::Failed {
-                name: "write_file".into(),
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| failed("write_file", e))?;
         Ok(format!("wrote {}", decision.resolved.display()))
     }
 }

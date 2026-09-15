@@ -130,3 +130,34 @@ async fn git_and_ssh_paths_blocked() {
         );
     }
 }
+
+#[tokio::test]
+async fn list_omits_denylisted_names() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join("ok.txt"), "x").unwrap();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    fs::create_dir(dir.path().join(".ssh")).unwrap();
+    let entries = sb
+        .list(Path::new("."), WritePermit::Normal, &CancellationToken::new())
+        .await
+        .unwrap();
+    let names: Vec<_> = entries.iter().map(|e| e.name.as_str()).collect();
+    assert!(names.contains(&"ok.txt"));
+    assert!(!names.contains(&".env"), "denylist names must not be advertised");
+    assert!(!names.contains(&".ssh"));
+}
+
+#[tokio::test]
+async fn list_of_git_dir_is_blocked() {
+    let (dir, sb) = sandbox();
+    fs::create_dir(dir.path().join(".git")).unwrap();
+    let err = sb
+        .list(
+            Path::new(".git"),
+            WritePermit::Normal,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SandboxError::Denylist { pattern: ".git", .. }));
+}

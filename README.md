@@ -16,7 +16,7 @@ propio loop del agente se intercambian en tiempo de composición, sin tocar
 | `forger-core` | `Message` / `StreamEvent`, traits `Provider` y `Tool`, `AgentLoop`, modo `quality` |
 | `forger-sandbox` | Denylist de paths, resolución del path **final**, Landlock, timeout de comandos |
 | `forger-providers` | `MockProvider` + `OpenAiCompatProvider` (DeepSeek, Ollama/llama.cpp compat, Mistral, …) |
-| `forger-tools` | `read_file`, `write_file`, `run_command` |
+| `forger-tools` | `read_file`, `list_dir`, `grep`, `edit_file`, `write_file`, `run_command` |
 | `forger-cli` | binario `forger` — REPL y `--message` |
 | `forger-server` | binario `forger-server` — UI local + SSE en loopback, **sin auth** |
 

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 const DEFAULT_MAX_STEPS: usize = 20;
-const DEFAULT_SYSTEM_PROMPT: &str = "You are Forger, a coding agent. Use the provided tools to read, write, and run commands in the workspace. Prefer small, targeted edits. Never exfiltrate secrets.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are Forger, a coding agent. Use list_dir and grep to explore, read_file to inspect, edit_file for targeted patches, and write_file only for new files. run_command is for builds and tests, not for reading files. Never exfiltrate secrets; .env/.git/.ssh/credentials are blocked unless the user explicitly overrides the denylist.";
 
 #[derive(Clone)]
 pub struct AgentLoopConfig {

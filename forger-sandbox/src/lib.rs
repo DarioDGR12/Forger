@@ -60,6 +60,14 @@ pub struct PathDecision {
 }
 
 #[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub name: String,
+    /// Path relative to the workspace when possible.
+    pub path: PathBuf,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct CommandOutput {
     pub exit_code: i32,
     pub stdout: String,
@@ -81,7 +89,12 @@ pub trait Sandbox: Plugin {
 
     fn inspect(&self, requested: &Path) -> Result<PathDecision, SandboxError>;
 
-    async fn read(&self, requested: &Path, cancel: &CancellationToken) -> Result<String, SandboxError>;
+    async fn read(
+        &self,
+        requested: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<String, SandboxError>;
 
     async fn write(
         &self,
@@ -97,6 +110,15 @@ pub trait Sandbox: Plugin {
         timeout: Duration,
         cancel: &CancellationToken,
     ) -> Result<CommandOutput, SandboxError>;
+
+    /// List a directory. Denylisted children are omitted (not advertised).
+    /// Listing a denylisted directory itself is blocked unless `permit` matches.
+    async fn list(
+        &self,
+        requested: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DirEntry>, SandboxError>;
 
     fn landlock_warning(&self) -> Option<String>;
 }
@@ -177,12 +199,17 @@ impl Sandbox for FsSandbox {
         self.decide(requested)
     }
 
-    async fn read(&self, requested: &Path, cancel: &CancellationToken) -> Result<String, SandboxError> {
+    async fn read(
+        &self,
+        requested: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<String, SandboxError> {
         if cancel.is_cancelled() {
             return Err(SandboxError::Cancelled);
         }
         let decision = self.decide(requested)?;
-        self.enforce_denylist(&decision, &WritePermit::Normal)?;
+        self.enforce_denylist(&decision, &permit)?;
         Ok(tokio::fs::read_to_string(&decision.resolved).await?)
     }
 
@@ -213,6 +240,50 @@ impl Sandbox for FsSandbox {
     ) -> Result<CommandOutput, SandboxError> {
         exec::run_command(&self.workspace, command, timeout, cancel, self.landlock_warning.as_deref())
             .await
+    }
+
+    async fn list(
+        &self,
+        requested: &Path,
+        permit: WritePermit,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<DirEntry>, SandboxError> {
+        if cancel.is_cancelled() {
+            return Err(SandboxError::Cancelled);
+        }
+        let decision = self.decide(requested)?;
+        self.enforce_denylist(&decision, &permit)?;
+        let meta = tokio::fs::metadata(&decision.resolved).await?;
+        if !meta.is_dir() {
+            return Err(SandboxError::Other(format!(
+                "`{}` is not a directory",
+                decision.resolved.display()
+            )));
+        }
+        let mut rd = tokio::fs::read_dir(&decision.resolved).await?;
+        let mut out = Vec::new();
+        while let Some(ent) = rd.next_entry().await? {
+            if cancel.is_cancelled() {
+                return Err(SandboxError::Cancelled);
+            }
+            let p = ent.path();
+            if denylist::check(&p).is_some() {
+                continue;
+            }
+            let name = ent.file_name().to_string_lossy().into_owned();
+            let is_dir = ent.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+            let rel = p
+                .strip_prefix(&self.workspace)
+                .unwrap_or(&p)
+                .to_path_buf();
+            out.push(DirEntry {
+                name,
+                path: rel,
+                is_dir,
+            });
+        }
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(out)
     }
 
     fn landlock_warning(&self) -> Option<String> {

@@ -1,3 +1,4 @@
+use crate::{failed, path_permit};
 use async_trait::async_trait;
 use forger_core::{required_path, Tool, ToolContext, ToolError, ToolSpec};
 use forger_sandbox::Sandbox;
@@ -32,12 +33,14 @@ impl Tool for ReadFile {
 
     async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<String, ToolError> {
         let path = required_path(&args)?;
-        match self.sandbox.read(&path, &ctx.cancel).await {
-            Ok(s) => Ok(s),
-            Err(e) => Err(ToolError::Failed {
-                name: "read_file".into(),
-                reason: e.to_string(),
-            }),
-        }
+        let decision = self
+            .sandbox
+            .inspect(&path)
+            .map_err(|e| failed("read_file", e))?;
+        let permit = path_permit("read_file", &decision, ctx.denylist_override)?;
+        self.sandbox
+            .read(&path, permit, &ctx.cancel)
+            .await
+            .map_err(|e| failed("read_file", e))
     }
 }
