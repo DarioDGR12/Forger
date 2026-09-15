@@ -196,3 +196,41 @@ async fn quality_candidates_overlap_on_shared_provider() {
     assert_eq!(report.candidates.len(), 2);
     assert_eq!(report.winner_index, 1);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quality_cancel_aborts_in_flight_candidates() {
+    use std::time::{Duration, Instant};
+
+    let delay = Duration::from_millis(400);
+    let shared = SlowShared::new(delay);
+    let reviewer = ScriptedProvider::new(vec![]);
+    let agent = AgentLoop::new(
+        Arc::clone(&shared) as forger_core::SharedProvider,
+        ToolRegistry::new(),
+        Arc::new(AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        }),
+        AgentLoopConfig::default(),
+    );
+    let cancel = CancellationToken::new();
+    let cancel_bg = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        cancel_bg.cancel();
+    });
+
+    let started = Instant::now();
+    let err = forger_core::run_quality_turn(agent, reviewer, "task", 2, cancel)
+        .await
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(err, forger_core::AgentError::Cancelled),
+        "expected Cancelled, got {err:?}"
+    );
+    assert!(
+        elapsed < delay,
+        "cancel should abort spawned candidates, took {elapsed:?}"
+    );
+}

@@ -2,8 +2,8 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use forger_core::approval::AutoApprover;
 use forger_core::{
-    Agent, AgentEvent, AgentLoop, AgentLoopConfig, Approver, CancellationToken, QualityConfig,
-    QualityRunner, Session, UserTurn,
+    run_quality_turn, Agent, AgentEvent, AgentLoop, AgentLoopConfig, Approver, CancellationToken,
+    Session, SharedProvider, UserTurn,
 };
 use forger_providers::{MockProvider, OpenAiCompatConfig, OpenAiCompatProvider};
 use forger_sandbox::{FsSandbox, Sandbox};
@@ -140,20 +140,11 @@ async fn main() -> Result<()> {
             .message
             .clone()
             .context("--quality requires --message")?;
-        let qcfg = QualityConfig {
-            candidates: cli.quality_n,
-        };
-        let make = {
-            let provider = provider.clone();
-            let tools = tools.clone();
-            let approver = approver.clone();
-            let config = config.clone();
-            move || AgentLoop::new(provider.clone(), tools.clone(), approver.clone(), config.clone())
-        };
-        let runner = QualityRunner::new(provider, qcfg);
+        let agent = AgentLoop::new(provider.clone(), tools, approver, config);
         let cancel = CancellationToken::new();
         ctrlc_cancel(cancel.clone());
-        let (session, report) = runner.run(make, &task, cancel).await?;
+        let (session, report) =
+            run_quality_turn(agent, provider, &task, cli.quality_n, cancel).await?;
         println!(
             "quality: winner candidate {} / {}",
             report.winner_index, report.candidates.len()
@@ -209,7 +200,7 @@ fn build_provider(
     kind: Option<ProviderKind>,
     model: Option<String>,
     base_url: Option<String>,
-) -> Result<Arc<dyn forger_core::Provider>> {
+) -> Result<SharedProvider> {
     let kind = kind.unwrap_or_else(|| {
         if OpenAiCompatConfig::from_env().is_some() {
             ProviderKind::OpenaiCompat
