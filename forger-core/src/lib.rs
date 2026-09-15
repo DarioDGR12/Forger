@@ -15,6 +15,7 @@ pub mod plugin;
 pub mod quality;
 pub mod session;
 pub mod tool;
+pub mod tool_calls;
 
 pub use agent::{Agent, AgentEvent, TurnOutcome, UserTurn};
 pub use agent_loop::{AgentLoop, AgentLoopConfig};
@@ -27,5 +28,6 @@ pub use plugin::{Plugin, PluginId, Provider};
 pub use quality::{QualityConfig, QualityReport, QualityRunner, ScoredCandidate};
 pub use session::Session;
 pub use tool::{required_path, Tool, ToolContext, ToolRegistry, ToolSpec};
+pub use tool_calls::ToolCallAccumulator;
 
 pub use tokio_util::sync::CancellationToken;

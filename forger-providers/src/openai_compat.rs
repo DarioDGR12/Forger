@@ -9,11 +9,20 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ToolChoice {
+    #[default]
+    Auto,
+    Required,
+    None,
+}
+
 #[derive(Clone, Debug)]
 pub struct OpenAiCompatConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub tool_choice: ToolChoice,
 }
 
 impl OpenAiCompatConfig {
@@ -22,14 +31,29 @@ impl OpenAiCompatConfig {
             .or_else(|_| std::env::var("OPENAI_API_KEY"))
             .or_else(|_| std::env::var("DEEPSEEK_API_KEY"))
             .ok()?;
-        let base_url =
-            std::env::var("FORGER_BASE_URL").unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
+        let base_url = std::env::var("FORGER_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/v1".into());
         let model = std::env::var("FORGER_MODEL").unwrap_or_else(|_| "deepseek-chat".into());
         Some(Self {
             base_url,
             api_key,
             model,
+            tool_choice: ToolChoice::Auto,
         })
+    }
+
+    pub fn deepseek(api_key: impl Into<String>) -> Self {
+        Self {
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: api_key.into(),
+            model: "deepseek-chat".into(),
+            tool_choice: ToolChoice::Auto,
+        }
+    }
+
+    pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+        self.tool_choice = tool_choice;
+        self
     }
 }
 
@@ -79,6 +103,11 @@ impl Provider for OpenAiCompatProvider {
         });
         if !tools.is_empty() {
             body["tools"] = tools_to_openai(tools);
+            body["tool_choice"] = match self.config.tool_choice {
+                ToolChoice::Auto => json!("auto"),
+                ToolChoice::Required => json!("required"),
+                ToolChoice::None => json!("none"),
+            };
         }
 
         let request = self
@@ -102,9 +131,9 @@ impl Provider for OpenAiCompatProvider {
             return Err(ProviderError::Transport(format!("HTTP {status}: {text}")));
         }
 
-        let byte_stream = response.bytes_stream().map(|r| {
-            r.map_err(|e| ProviderError::Transport(e.to_string()))
-        });
+        let byte_stream = response
+            .bytes_stream()
+            .map(|r| r.map_err(|e| ProviderError::Transport(e.to_string())));
         Ok(sse_to_events(byte_stream, cancel))
     }
 }
@@ -182,7 +211,17 @@ where
                 item = byte_stream.next() => item,
             };
             match next {
-                None => break,
+                None => {
+                    let rest = buf.trim();
+                    if !rest.is_empty() {
+                        for ev in parse_sse_frame(rest) {
+                            if tx.send(ev).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    break;
+                }
                 Some(Err(e)) => {
                     let _ = tx.send(Err(e));
                     break;
@@ -269,6 +308,7 @@ struct Delta {
 
 #[derive(Debug, Deserialize)]
 struct DeltaToolCall {
+    #[serde(default)]
     index: usize,
     id: Option<String>,
     function: Option<DeltaFunction>,
@@ -277,7 +317,20 @@ struct DeltaToolCall {
 #[derive(Debug, Deserialize)]
 struct DeltaFunction {
     name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_stringish")]
     arguments: Option<String>,
+}
+
+fn deserialize_opt_stringish<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s),
+        Some(other) => Some(other.to_string()),
+    })
 }
 
 fn chunk_to_events(chunk: ChatChunk) -> Vec<Result<StreamEvent, ProviderError>> {
@@ -336,7 +389,9 @@ mod tests {
         let frame = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{}"}}]},"finish_reason":null}]}"#;
         let ev = parse_sse_frame(frame);
         match &ev[0] {
-            Ok(StreamEvent::ToolCallDelta { name, arguments, .. }) => {
+            Ok(StreamEvent::ToolCallDelta {
+                name, arguments, ..
+            }) => {
                 assert_eq!(name.as_deref(), Some("read_file"));
                 assert_eq!(arguments.as_deref(), Some("{}"));
             }
@@ -347,5 +402,59 @@ mod tests {
     #[test]
     fn done_frame_is_empty() {
         assert!(parse_sse_frame("data: [DONE]").is_empty());
+    }
+
+    #[test]
+    fn missing_tool_call_index_defaults_to_zero() {
+        let frame = r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"n","arguments":"{}"}}]}}]}"#;
+        let ev = parse_sse_frame(frame);
+        match &ev[0] {
+            Ok(StreamEvent::ToolCallDelta { index, name, .. }) => {
+                assert_eq!(*index, 0);
+                assert_eq!(name.as_deref(), Some("n"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn take_frames_keeps_index_across_fragmented_tool_call_chunks() {
+        let mut buf = String::from(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c1","function":{"name":"get_time","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"get_weather","arguments":""}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"tz\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"Tokyo\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"UTC\"}"}}]}}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+
+"#,
+        );
+        let events: Vec<StreamEvent> = take_frames(&mut buf)
+            .into_iter()
+            .map(|r| r.expect("frame"))
+            .collect();
+        let mut acc = forger_core::ToolCallAccumulator::new();
+        for ev in &events {
+            acc.apply_event(ev);
+        }
+        let calls = acc.finish();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, r#"{"city":"Tokyo"}"#);
+        assert_eq!(calls[1].name, "get_time");
+        assert_eq!(calls[1].arguments, r#"{"tz":"UTC"}"#);
+        assert!(matches!(
+            events.last(),
+            Some(StreamEvent::Finished {
+                reason: FinishReason::ToolCalls
+            })
+        ));
     }
 }

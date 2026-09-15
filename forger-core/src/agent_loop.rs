@@ -17,6 +17,7 @@ use crate::message::{FinishReason, Message, StreamEvent, ToolCall};
 use crate::plugin::Provider;
 use crate::session::Session;
 use crate::tool::{ToolContext, ToolRegistry};
+use crate::tool_calls::ToolCallAccumulator;
 use async_trait::async_trait;
 use futures::StreamExt;
 use serde_json::Value;
@@ -91,7 +92,7 @@ impl AgentLoop {
             .await?;
 
         let mut text = String::new();
-        let mut builders: Vec<ToolCallBuilder> = Vec::new();
+        let mut tool_calls = ToolCallAccumulator::new();
         let mut finish = None;
 
         loop {
@@ -125,19 +126,7 @@ impl AgentLoop {
                             name,
                             arguments,
                         } => {
-                            while builders.len() <= index {
-                                builders.push(ToolCallBuilder::default());
-                            }
-                            let b = &mut builders[index];
-                            if let Some(id) = id {
-                                b.id = id;
-                            }
-                            if let Some(name) = name {
-                                b.name = name;
-                            }
-                            if let Some(arguments) = arguments {
-                                b.arguments.push_str(&arguments);
-                            }
+                            tool_calls.apply(index, id, name, arguments);
                         }
                         StreamEvent::Finished { reason } => {
                             finish = Some(reason);
@@ -148,7 +137,7 @@ impl AgentLoop {
         }
 
         let reason = finish.unwrap_or(FinishReason::Stop);
-        let calls: Vec<ToolCall> = builders.into_iter().filter_map(|b| b.into_tool_call()).collect();
+        let calls = tool_calls.finish();
         Ok((text, calls, reason))
     }
 
@@ -314,30 +303,6 @@ fn path_looks_like(lower: &str, pat: &str) -> bool {
             comp == pat
         }
     })
-}
-
-#[derive(Default)]
-struct ToolCallBuilder {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-impl ToolCallBuilder {
-    fn into_tool_call(self) -> Option<ToolCall> {
-        if self.name.is_empty() && self.id.is_empty() {
-            return None;
-        }
-        Some(ToolCall {
-            id: if self.id.is_empty() {
-                format!("call-{}", self.name)
-            } else {
-                self.id
-            },
-            name: self.name,
-            arguments: self.arguments,
-        })
-    }
 }
 
 #[async_trait]
