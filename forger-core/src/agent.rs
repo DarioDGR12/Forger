@@ -28,6 +28,10 @@ pub enum TurnOutcome {
     Completed,
     Cancelled,
     Failed,
+    /// The turn budget (`max_steps` / max turns) was exhausted after a
+    /// provider call. Tool results from that last call are committed so the
+    /// session never has a `tool_calls` message without matching results.
+    StepLimit,
 }
 
 /// Swappable agent driver. [`crate::agent_loop::AgentLoop`] is the default.

@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use forger_core::approval::AutoApprover;
 use forger_core::{
     Agent, AgentEvent, AgentLoop, AgentLoopConfig, Approver, CancellationToken, QualityConfig,
-    QualityRunner, Session, UserTurn,
+    QualityRunner, Session, TurnOutcome, UserTurn,
 };
 use forger_providers::{MockProvider, OpenAiCompatConfig, OpenAiCompatProvider};
 use forger_sandbox::{FsSandbox, Sandbox};
@@ -186,7 +186,7 @@ async fn main() -> Result<()> {
             AgentEvent::Cancelled => eprintln!("\n(cancelled)"),
             _ => {}
         };
-        agent
+        let outcome = agent
             .run_turn(
                 &mut session,
                 UserTurn { text: msg },
@@ -194,6 +194,9 @@ async fn main() -> Result<()> {
                 &mut sink,
             )
             .await?;
+        if outcome == TurnOutcome::StepLimit {
+            eprintln!("stopped: max turns reached (tool results from the last turn were kept)");
+        }
         println!();
         return Ok(());
     }

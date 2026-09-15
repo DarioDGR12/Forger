@@ -435,3 +435,59 @@ async fn cancel_after_tool_calls_still_writes_tool_results() {
         );
     }
 }
+
+#[tokio::test]
+async fn max_turns_executes_last_tool_calls_without_orphans_or_hard_error() {
+    // Bug: the loop used to `continue` after tools on the last step, fall out
+    // of `0..max_steps`, and return Err(StepLimit) *after* committing
+    // assistant+tool messages. Callers then treated a well-formed transcript
+    // as a crash.
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let agent = AgentLoop::new(
+        ScriptedProvider::new(vec![
+            tool_call("c1", "echo", r#"{"text":"from-tool"}"#),
+            text_then("must-not-run"),
+        ]),
+        tools,
+        Arc::new(AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        }),
+        AgentLoopConfig::default().with_max_turns(1),
+    );
+    let mut session = Session::new();
+    let outcome = run(&agent, &mut session, "go").await.unwrap();
+    assert_eq!(outcome, TurnOutcome::StepLimit);
+    let roles: Vec<_> = session.messages().iter().map(|m| m.role).collect();
+    assert_eq!(roles, vec![Role::User, Role::Assistant, Role::Tool]);
+    assert!(session.messages()[1].has_tool_calls());
+    assert_eq!(session.messages()[2].content, "from-tool");
+    assert_eq!(
+        session.last_assistant_text(),
+        None,
+        "no extra provider turn should have produced final text"
+    );
+}
+
+#[tokio::test]
+async fn max_turns_two_allows_tool_then_final_text() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let agent = AgentLoop::new(
+        ScriptedProvider::new(vec![
+            tool_call("c1", "echo", r#"{"text":"from-tool"}"#),
+            text_then("done"),
+        ]),
+        tools,
+        Arc::new(AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        }),
+        AgentLoopConfig::default().with_max_turns(2),
+    );
+    let mut session = Session::new();
+    let outcome = run(&agent, &mut session, "go").await.unwrap();
+    assert_eq!(outcome, TurnOutcome::Completed);
+    assert_eq!(session.last_assistant_text(), Some("done"));
+}

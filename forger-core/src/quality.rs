@@ -126,7 +126,7 @@ impl QualityRunner {
                     .last_assistant_text()
                     .unwrap_or("")
                     .to_string(),
-                Ok(TurnOutcome::Cancelled) => String::new(),
+                Ok(TurnOutcome::Cancelled) | Ok(TurnOutcome::StepLimit) => String::new(),
                 Ok(TurnOutcome::Failed) | Err(_) => session
                     .last_assistant_text()
                     .unwrap_or("")

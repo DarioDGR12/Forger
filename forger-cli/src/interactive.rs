@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use forger_core::{
     Agent, AgentEvent, AgentLoop, AgentLoopConfig, ApprovalKind, ApprovalRequest, Approver,
-    CancellationToken, Decision, Provider, Session, ToolRegistry, UserTurn,
+    CancellationToken, Decision, Provider, Session, ToolRegistry, TurnOutcome, UserTurn,
 };
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
@@ -145,6 +145,10 @@ pub async fn repl(
             )
             .await
         {
+            Ok(TurnOutcome::StepLimit) => {
+                println!();
+                eprintln!("stopped: max turns reached (session kept)");
+            }
             Ok(_) => println!(),
             Err(e) => eprintln!("\nerror: {e}"),
         }

@@ -9,6 +9,11 @@
 //! 5. On cancel or a truncated stream, restore the session to the last
 //!    checkpoint so it is never left with a half-written assistant turn or
 //!    a tool_call without a matching result.
+//! 6. `max_steps` is the turn budget: one provider call = one turn. If the
+//!    last allowed turn returns `tool_calls`, those tools still run and their
+//!    results are committed; the loop then stops with [`TurnOutcome::StepLimit`]
+//!    instead of calling the provider again or returning `Err` after mutating
+//!    the session.
 
 use crate::agent::{emit, stream_event_to_agent, Agent, AgentEvent, TurnOutcome, UserTurn};
 use crate::approval::{ApprovalKind, ApprovalRequest, Approver, Decision};
@@ -30,6 +35,9 @@ const DEFAULT_SYSTEM_PROMPT: &str = "You are Forger, a coding agent. Use the pro
 #[derive(Clone)]
 pub struct AgentLoopConfig {
     pub system_prompt: String,
+    /// Maximum provider calls (turns) per `run_turn`. This is the `max_turns`
+    /// budget: tool execution belonging to the last call does not consume an
+    /// extra turn, and must not orphan `tool_calls`.
     pub max_steps: usize,
     pub workspace: PathBuf,
 }
@@ -41,6 +49,13 @@ impl Default for AgentLoopConfig {
             max_steps: DEFAULT_MAX_STEPS,
             workspace: PathBuf::from("."),
         }
+    }
+}
+
+impl AgentLoopConfig {
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_steps = max_turns.max(1);
+        self
     }
 }
 
@@ -351,7 +366,8 @@ impl Agent for AgentLoop {
     ) -> Result<TurnOutcome, AgentError> {
         session.push(Message::user(input.text));
 
-        for step in 0..self.config.max_steps {
+        let max_steps = self.config.max_steps.max(1);
+        for step in 0..max_steps {
             if cancel.is_cancelled() {
                 emit(sink, AgentEvent::Cancelled);
                 return Ok(TurnOutcome::Cancelled);
@@ -386,6 +402,23 @@ impl Agent for AgentLoop {
                 if cancel.is_cancelled() {
                     emit(sink, AgentEvent::Cancelled);
                     return Ok(TurnOutcome::Cancelled);
+                }
+                // Last allowed provider call already happened. Do not `continue`
+                // into a StepLimit *error* after the session has grown — that
+                // made callers treat a well-formed (assistant + tool results)
+                // transcript as a hard failure, and skipped a clean stop.
+                if step + 1 >= max_steps {
+                    let outcome = TurnOutcome::StepLimit;
+                    emit(
+                        sink,
+                        AgentEvent::Warning {
+                            message: format!(
+                                "max_turns/max_steps ({max_steps}) reached after tool calls; not invoking the provider again"
+                            ),
+                        },
+                    );
+                    emit(sink, AgentEvent::Finished { outcome });
+                    return Ok(outcome);
                 }
                 continue;
             }

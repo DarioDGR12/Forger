@@ -130,3 +130,36 @@ async fn git_and_ssh_paths_blocked() {
         );
     }
 }
+
+#[tokio::test]
+async fn read_env_blocked_without_override() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    let err = sb
+        .read(
+            Path::new(".env"),
+            WritePermit::Normal,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, SandboxError::Denylist { pattern: ".env", .. }));
+}
+
+#[tokio::test]
+async fn read_env_allowed_with_matching_override() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    let decision = sb.inspect(Path::new(".env")).unwrap();
+    let got = sb
+        .read(
+            Path::new(".env"),
+            WritePermit::DenylistOverride {
+                confirmed_resolved: decision.resolved,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(got, "SECRET=1");
+}
