@@ -14,7 +14,7 @@ use crate::agent::{emit, stream_event_to_agent, Agent, AgentEvent, TurnOutcome, 
 use crate::approval::{ApprovalKind, ApprovalRequest, Approver, Decision};
 use crate::error::{AgentError, ProviderError, ToolError};
 use crate::message::{FinishReason, Message, StreamEvent, ToolCall};
-use crate::plugin::Provider;
+use crate::plugin::SharedProvider;
 use crate::session::Session;
 use crate::tool::{ToolContext, ToolRegistry};
 use async_trait::async_trait;
@@ -44,18 +44,22 @@ impl Default for AgentLoopConfig {
     }
 }
 
+/// Default loop. `Clone` is cheap: provider/tools/approver are `Arc`, so N
+/// quality-mode candidates can `tokio::spawn` independent turns that share one
+/// [`SharedProvider`] without serializing on the parent task.
+#[derive(Clone)]
 pub struct AgentLoop {
-    provider: Arc<dyn Provider>,
+    provider: SharedProvider,
     tools: ToolRegistry,
-    approver: Arc<dyn Approver>,
+    approver: Arc<dyn Approver + Send + Sync>,
     config: AgentLoopConfig,
 }
 
 impl AgentLoop {
     pub fn new(
-        provider: Arc<dyn Provider>,
+        provider: SharedProvider,
         tools: ToolRegistry,
-        approver: Arc<dyn Approver>,
+        approver: Arc<dyn Approver + Send + Sync>,
         config: AgentLoopConfig,
     ) -> Self {
         Self {

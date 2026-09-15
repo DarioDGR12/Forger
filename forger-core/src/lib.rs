@@ -23,8 +23,10 @@ pub use approval::{
 };
 pub use error::{AgentError, ProviderError, ToolError};
 pub use message::{FinishReason, Message, Role, StreamEvent, ToolCall};
-pub use plugin::{Plugin, PluginId, Provider};
-pub use quality::{QualityConfig, QualityReport, QualityRunner, ScoredCandidate};
+pub use plugin::{Plugin, PluginId, Provider, SharedProvider};
+pub use quality::{
+    run_quality_turn, QualityConfig, QualityReport, QualityRunner, ScoredCandidate,
+};
 pub use session::Session;
 pub use tool::{required_path, Tool, ToolContext, ToolRegistry, ToolSpec};
 

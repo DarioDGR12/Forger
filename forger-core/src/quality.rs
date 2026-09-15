@@ -1,21 +1,26 @@
 //! Multi-agent quality mode.
 //!
 //! N candidate [`crate::agent::Agent`] loops (default 2, max 3) run the same
-//! task in parallel. A separate reviewer loop scores each complete result
-//! 0–10 and the highest score wins. Merge is "pick the best complete
-//! candidate", not a diff merge — that is future work.
+//! task **in parallel on real `tokio::spawn` tasks**. That works because
+//! [`crate::plugin::SharedProvider`] is `Arc<dyn Provider + Send + Sync>` —
+//! the backend is shareable across tasks, not locked to one sequential
+//! `run_turn().await` after another.
+//!
+//! A separate reviewer scores each complete result 0–10 and the highest
+//! score wins (ties keep the earlier candidate). Merge is "pick the best
+//! complete candidate", not a diff merge — that is future work.
 //!
 //! Each extra candidate multiplies token spend. Keep the default at 2.
 
 use crate::agent::{Agent, AgentEvent, TurnOutcome, UserTurn};
+use crate::agent_loop::AgentLoop;
 use crate::error::AgentError;
 use crate::message::Message;
-use crate::plugin::Provider;
+use crate::plugin::SharedProvider;
 use crate::session::Session;
 use crate::tool::ToolSpec;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_CANDIDATES: u8 = 2;
@@ -62,11 +67,11 @@ pub struct QualityReport {
 
 pub struct QualityRunner {
     pub config: QualityConfig,
-    pub reviewer: Arc<dyn Provider>,
+    pub reviewer: SharedProvider,
 }
 
 impl QualityRunner {
-    pub fn new(reviewer: Arc<dyn Provider>, config: QualityConfig) -> Self {
+    pub fn new(reviewer: SharedProvider, config: QualityConfig) -> Self {
         Self {
             config: config.clamped(),
             reviewer,
@@ -74,6 +79,10 @@ impl QualityRunner {
     }
 
     /// Run `n` independent copies of `make_agent` on the same task, score, pick best.
+    ///
+    /// Candidates are `tokio::spawn`'d immediately so their provider calls overlap.
+    /// The factory runs on this task (to build each `Agent`); the turn itself
+    /// runs on the worker. Abort outstanding tasks if `cancel` fires while joining.
     pub async fn run<F, A>(
         &self,
         make_agent: F,
@@ -85,35 +94,53 @@ impl QualityRunner {
         A: Agent + Send + 'static,
     {
         let n = self.config.candidates as usize;
-        let mut joins = Vec::with_capacity(n);
+        let mut set = tokio::task::JoinSet::new();
         for i in 0..n {
             if cancel.is_cancelled() {
+                set.abort_all();
                 return Err(AgentError::Cancelled);
             }
             let agent = make_agent();
             let task = task.to_string();
-            let cancel = cancel.clone();
-            joins.push(tokio::spawn(async move {
+            let task_cancel = cancel.clone();
+            set.spawn(async move {
                 let mut session = Session::new();
                 let mut sink = |_ev: AgentEvent| {};
                 let outcome = agent
                     .run_turn(
                         &mut session,
                         UserTurn { text: task },
-                        cancel,
+                        task_cancel,
                         &mut sink,
                     )
                     .await;
                 (i, session, outcome)
-            }));
+            });
         }
 
         let mut raw = Vec::with_capacity(n);
-        for j in joins {
-            match j.await {
-                Ok(v) => raw.push(v),
-                Err(e) => {
-                    return Err(AgentError::Other(format!("candidate task join error: {e}")));
+        while raw.len() < n {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    set.abort_all();
+                    return Err(AgentError::Cancelled);
+                }
+                next = set.join_next() => {
+                    match next {
+                        None => break,
+                        Some(Ok(v)) => raw.push(v),
+                        Some(Err(e)) if e.is_cancelled() => {
+                            set.abort_all();
+                            return Err(AgentError::Cancelled);
+                        }
+                        Some(Err(e)) => {
+                            set.abort_all();
+                            return Err(AgentError::Other(format!(
+                                "candidate task join error: {e}"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -141,11 +168,7 @@ impl QualityRunner {
             });
         }
 
-        let winner_index = scored
-            .iter()
-            .max_by_key(|c| c.score)
-            .map(|c| c.index)
-            .unwrap_or(0);
+        let winner_index = pick_winner(&scored);
         let winner_session = raw
             .into_iter()
             .find(|(i, _, _)| *i == winner_index)
@@ -192,6 +215,34 @@ impl QualityRunner {
     }
 }
 
+/// Run N clones of `agent` in parallel, then score with `reviewer`.
+///
+/// `AgentLoop` is `Clone` because it holds a [`SharedProvider`], so each clone
+/// can move into `tokio::spawn`.
+pub async fn run_quality_turn(
+    agent: AgentLoop,
+    reviewer: SharedProvider,
+    task: &str,
+    n_candidates: u8,
+    cancel: CancellationToken,
+) -> Result<(Session, QualityReport), AgentError> {
+    let runner = QualityRunner::new(
+        reviewer,
+        QualityConfig {
+            candidates: n_candidates,
+        },
+    );
+    runner.run(move || agent.clone(), task, cancel).await
+}
+
+fn pick_winner(scored: &[ScoredCandidate]) -> usize {
+    scored
+        .iter()
+        .max_by(|a, b| a.score.cmp(&b.score).then(b.index.cmp(&a.index)))
+        .map(|c| c.index)
+        .unwrap_or(0)
+}
+
 fn parse_score(raw: &str) -> (u8, String) {
     let trimmed = raw.trim();
     let json_slice = if let (Some(s), Some(e)) = (trimmed.find('{'), trimmed.rfind('}')) {
@@ -217,7 +268,7 @@ fn parse_score(raw: &str) -> (u8, String) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_score;
+    use super::{parse_score, pick_winner, ScoredCandidate};
 
     #[test]
     fn parse_score_reads_json_even_with_prose_wrapper() {
@@ -230,5 +281,17 @@ mod tests {
     fn parse_score_garbage_is_zero() {
         let (s, _) = parse_score("I like it a lot");
         assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn pick_winner_keeps_first_on_tie() {
+        let c = |index, score| ScoredCandidate {
+            index,
+            score,
+            rationale: String::new(),
+            text: String::new(),
+        };
+        assert_eq!(pick_winner(&[c(0, 8), c(1, 8)]), 0);
+        assert_eq!(pick_winner(&[c(0, 7), c(1, 9), c(2, 9)]), 1);
     }
 }
