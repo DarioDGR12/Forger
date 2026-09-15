@@ -49,6 +49,10 @@ cargo test --workspace
 
 # Live DeepSeek tool-call stream (se salta si la variable no está):
 DEEPSEEK_API_KEY=sk-... cargo test -p forger-providers --test deepseek_live -- --nocapture
+
+# Forzar tool_calls contra DeepSeek:
+export DEEPSEEK_API_KEY=sk-...
+cargo run -p forger-cli -- --tool-choice required --message "qué hora es en Tokio"
 ```
 
 ## Decisiones que no se reabren a la ligera
