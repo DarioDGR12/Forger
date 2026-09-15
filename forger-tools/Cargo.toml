@@ -1,0 +1,24 @@
+[package]
+name = "forger-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Stock tools: read_file, write_file, edit_file, list_dir, grep, run_command"
+
+[dependencies]
+async-trait.workspace = true
+forger-core.workspace = true
+forger-sandbox.workspace = true
+regex = "1"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
