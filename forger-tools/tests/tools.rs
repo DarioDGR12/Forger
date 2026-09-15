@@ -72,6 +72,43 @@ async fn read_env_honors_denylist_override() {
 }
 
 #[tokio::test]
+async fn write_symlink_to_env_denied_without_override() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    std::os::unix::fs::symlink(dir.path().join(".env"), dir.path().join("innocent")).unwrap();
+    let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
+    let write = WriteFile::new(sb);
+    let err = write
+        .execute(
+            json!({"path":"innocent","contents":"SECRET=2"}),
+            &ctx(dir.path(), false),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ToolError::Denied { .. }));
+}
+
+#[tokio::test]
+async fn write_symlink_to_env_honors_denylist_override() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    std::os::unix::fs::symlink(dir.path().join(".env"), dir.path().join("innocent")).unwrap();
+    let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());
+    let write = WriteFile::new(sb);
+    write
+        .execute(
+            json!({"path":"innocent","contents":"SECRET=2"}),
+            &ctx(dir.path(), true),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "SECRET=2"
+    );
+}
+
+#[tokio::test]
 async fn hung_run_command_times_out() {
     let dir = tempdir().unwrap();
     let sb: Arc<dyn Sandbox> = Arc::new(FsSandbox::new(dir.path()).unwrap());

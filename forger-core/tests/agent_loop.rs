@@ -4,7 +4,9 @@
 //! streams, sensitive vs denylist confirmation, and cancel-without-corruption.
 
 use async_trait::async_trait;
-use forger_core::approval::AutoApprover;
+use forger_core::approval::{
+    ApprovalError, ApprovalKind, ApprovalRequest, Approver, AutoApprover, Decision,
+};
 use forger_core::{
     Agent, AgentEvent, AgentLoop, AgentLoopConfig, CancellationToken, FinishReason, Message,
     Plugin, PluginId, Provider, ProviderError, Role, Session, StreamEvent, Tool, ToolContext,
@@ -500,4 +502,157 @@ async fn max_turns_two_allows_tool_then_final_text() {
     let outcome = run(&agent, &mut session, "go").await.unwrap();
     assert_eq!(outcome, TurnOutcome::Completed);
     assert_eq!(session.last_assistant_text(), Some("done"));
+}
+
+struct RecordingApprover {
+    inner: AutoApprover,
+    kinds: Mutex<Vec<ApprovalKind>>,
+}
+
+#[async_trait]
+impl Approver for RecordingApprover {
+    async fn approve(&self, request: &ApprovalRequest) -> Result<Decision, ApprovalError> {
+        self.kinds.lock().unwrap().push(request.kind);
+        self.inner.approve(request).await
+    }
+}
+
+/// Pretends `path=innocent` resolved to `.env` — the name hint in the loop
+/// must not be the only denylist gate.
+struct ResolvedDenylistWrite;
+
+#[async_trait]
+impl Tool for ResolvedDenylistWrite {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "write_file".into(),
+            description: "write".into(),
+            parameters: json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        }
+    }
+
+    fn is_sensitive(&self) -> bool {
+        true
+    }
+
+    async fn execute(&self, args: Value, ctx: &ToolContext<'_>) -> Result<String, ToolError> {
+        let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+        if path == "innocent" && !ctx.denylist_override {
+            return Err(ToolError::Denied {
+                name: "write_file".into(),
+                reason: "denylist blocked `/ws/.env` (pattern `.env`); this is independent of sensitive-tool confirmation".into(),
+            });
+        }
+        Ok(format!("wrote {path}"))
+    }
+}
+
+#[tokio::test]
+async fn resolved_denylist_hit_asks_override_even_when_requested_name_is_clean() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(ResolvedDenylistWrite));
+    let approver = Arc::new(RecordingApprover {
+        inner: AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: true,
+        },
+        kinds: Mutex::new(Vec::new()),
+    });
+    let agent = AgentLoop::new(
+        ScriptedProvider::new(vec![
+            tool_call("c1", "write_file", r#"{"path":"innocent","contents":"x"}"#),
+            text_then("ok"),
+        ]),
+        tools,
+        approver.clone(),
+        AgentLoopConfig::default(),
+    );
+    let mut session = Session::new();
+    run(&agent, &mut session, "write").await.unwrap();
+    let tool_msg = session
+        .messages()
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .unwrap();
+    assert_eq!(tool_msg.content, "wrote innocent");
+    let kinds = approver.kinds.lock().unwrap().clone();
+    assert!(
+        kinds.contains(&ApprovalKind::DenylistOverride),
+        "expected denylist override prompt for resolved path, got {kinds:?}"
+    );
+}
+
+#[tokio::test]
+async fn resolved_denylist_hit_stays_blocked_without_override() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(ResolvedDenylistWrite));
+    let agent = loop_with(
+        ScriptedProvider::new(vec![
+            tool_call("c1", "write_file", r#"{"path":"innocent","contents":"x"}"#),
+            text_then("blocked"),
+        ]),
+        tools,
+        AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        },
+    );
+    let mut session = Session::new();
+    run(&agent, &mut session, "write").await.unwrap();
+    let tool_msg = session
+        .messages()
+        .iter()
+        .find(|m| m.role == Role::Tool)
+        .unwrap();
+    assert!(
+        tool_msg.content.contains("denylist"),
+        "expected denylist denial, got {}",
+        tool_msg.content
+    );
+}
+
+#[tokio::test]
+async fn multiple_tool_calls_in_one_turn_keep_order_and_matching_ids() {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(EchoTool));
+    let agent = loop_with(
+        ScriptedProvider::new(vec![
+            vec![
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 0,
+                    id: Some("c1".into()),
+                    name: Some("echo".into()),
+                    arguments: Some(r#"{"text":"one"}"#.into()),
+                }),
+                Ok(StreamEvent::ToolCallDelta {
+                    index: 1,
+                    id: Some("c2".into()),
+                    name: Some("echo".into()),
+                    arguments: Some(r#"{"text":"two"}"#.into()),
+                }),
+                Ok(StreamEvent::Finished {
+                    reason: FinishReason::ToolCalls,
+                }),
+            ],
+            text_then("both"),
+        ]),
+        tools,
+        AutoApprover {
+            allow_sensitive: true,
+            allow_denylist: false,
+        },
+    );
+    let mut session = Session::new();
+    run(&agent, &mut session, "both").await.unwrap();
+    let tools: Vec<_> = session
+        .messages()
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .collect();
+    assert_eq!(tools.len(), 2);
+    assert_eq!(tools[0].tool_call_id.as_deref(), Some("c1"));
+    assert_eq!(tools[0].content, "one");
+    assert_eq!(tools[1].tool_call_id.as_deref(), Some("c2"));
+    assert_eq!(tools[1].content, "two");
+    assert_eq!(session.last_assistant_text(), Some("both"));
 }

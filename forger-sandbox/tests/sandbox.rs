@@ -60,6 +60,29 @@ async fn write_via_symlink_to_env_is_blocked() {
 }
 
 #[tokio::test]
+async fn write_via_symlink_allowed_with_matching_resolved_override() {
+    let (dir, sb) = sandbox();
+    fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+    symlink(dir.path().join(".env"), dir.path().join("innocent")).unwrap();
+    let decision = sb.inspect(Path::new("innocent")).unwrap();
+    assert!(decision.denylist.is_some());
+    sb.write(
+        Path::new("innocent"),
+        "SECRET=2",
+        WritePermit::DenylistOverride {
+            confirmed_resolved: decision.resolved,
+        },
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".env")).unwrap(),
+        "SECRET=2"
+    );
+}
+
+#[tokio::test]
 async fn denylist_override_must_match_resolved_path() {
     let (_dir, sb) = sandbox();
     let decision = sb.inspect(Path::new(".env")).unwrap();

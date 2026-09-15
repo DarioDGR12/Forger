@@ -271,15 +271,42 @@ impl AgentLoop {
             }
         }
 
-        let ctx = ToolContext {
-            workspace: &self.config.workspace,
-            cancel: cancel.clone(),
-            denylist_override,
-        };
-        match tool.execute(args, &ctx).await {
-            Ok(out) => out,
-            Err(ToolError::Cancelled) => "error: tool cancelled".into(),
-            Err(e) => format!("error: {e}"),
+        // Name-based hint can miss a resolved target (symlink `innocent` → `.env`).
+        // If the tool/sandbox still returns Denied, ask for the denylist layer
+        // once and retry with override. The sandbox re-checks the resolved path.
+        loop {
+            let ctx = ToolContext {
+                workspace: &self.config.workspace,
+                cancel: cancel.clone(),
+                denylist_override,
+            };
+            match tool.execute(args.clone(), &ctx).await {
+                Ok(out) => return out,
+                Err(ToolError::Cancelled) => return "error: tool cancelled".into(),
+                Err(ToolError::Denied { reason, .. }) if !denylist_override => {
+                    let path = args.get("path").and_then(Value::as_str).map(PathBuf::from);
+                    match self
+                        .confirm(
+                            ApprovalKind::DenylistOverride,
+                            &call.name,
+                            &args,
+                            path,
+                            &reason,
+                        )
+                        .await
+                    {
+                        Ok(Decision::Allow) => {
+                            denylist_override = true;
+                            continue;
+                        }
+                        Ok(Decision::Deny { reason }) => {
+                            return format!("error: denylist blocked write/read ({reason})");
+                        }
+                        Err(e) => return format!("error: denylist approval failed ({e})"),
+                    }
+                }
+                Err(e) => return format!("error: {e}"),
+            }
         }
     }
 

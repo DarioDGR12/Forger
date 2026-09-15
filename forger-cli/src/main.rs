@@ -35,6 +35,11 @@ struct Cli {
     #[arg(long)]
     allow_denied_paths: bool,
 
+    /// Max provider calls (turns) per user message. Tool calls on the last
+    /// turn still run; the loop then stops instead of calling the model again.
+    #[arg(long, default_value_t = 20)]
+    max_turns: usize,
+
     /// Workspace directory
     #[arg(long, default_value = ".")]
     workspace: PathBuf,
@@ -130,7 +135,8 @@ async fn main() -> Result<()> {
     let config = AgentLoopConfig {
         workspace: workspace.clone(),
         ..AgentLoopConfig::default()
-    };
+    }
+    .with_max_turns(cli.max_turns);
 
     if cli.quality {
         if cli.quality_n == 0 || cli.quality_n > 3 {

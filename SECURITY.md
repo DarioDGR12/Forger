@@ -15,7 +15,10 @@ generic "sensitive tool" confirmation:
   that path, so approving `.env` does not authorize a different target.
 
 `write_file` resolves symlinks and `..` **before** the denylist check, so
-`innocent → .env` is treated as `.env`.
+`innocent → .env` is treated as `.env`. If the model asked to write `innocent`
+(the name hint in the agent loop does not see the symlink), the sandbox still
+denies and the loop asks for the denylist override on that resolved denial —
+`--yes` alone still does not punch through.
 
 ### Accepted gap: shell rename **and reads**
 

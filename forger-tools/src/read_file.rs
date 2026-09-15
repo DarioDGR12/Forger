@@ -64,10 +64,7 @@ impl Tool for ReadFile {
 
         match self.sandbox.read(&path, permit, &ctx.cancel).await {
             Ok(s) => Ok(s),
-            Err(e) => Err(ToolError::Failed {
-                name: "read_file".into(),
-                reason: e.to_string(),
-            }),
+            Err(e) => Err(crate::sandbox_to_tool_error("read_file", e)),
         }
     }
 }

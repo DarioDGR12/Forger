@@ -47,15 +47,7 @@ impl Tool for RunCommand {
                 "exit {}\nstdout:\n{}\nstderr:\n{}",
                 out.exit_code, out.stdout, out.stderr
             )),
-            Err(forger_sandbox::SandboxError::Timeout { timeout_ms }) => Err(ToolError::Timeout {
-                name: "run_command".into(),
-                timeout_ms,
-            }),
-            Err(forger_sandbox::SandboxError::Cancelled) => Err(ToolError::Cancelled),
-            Err(e) => Err(ToolError::Failed {
-                name: "run_command".into(),
-                reason: e.to_string(),
-            }),
+            Err(e) => Err(crate::sandbox_to_tool_error("run_command", e)),
         }
     }
 }

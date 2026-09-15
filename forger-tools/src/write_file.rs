@@ -19,7 +19,8 @@ impl Tool for WriteFile {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write_file".into(),
-            description: "Write a text file in the workspace. Sensitive: requires confirmation.".into(),
+            description: "Write a text file in the workspace. Sensitive: requires confirmation."
+                .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -69,10 +70,7 @@ impl Tool for WriteFile {
         self.sandbox
             .write(&path, contents, permit, &ctx.cancel)
             .await
-            .map_err(|e| ToolError::Failed {
-                name: "write_file".into(),
-                reason: e.to_string(),
-            })?;
+            .map_err(|e| crate::sandbox_to_tool_error("write_file", e))?;
         Ok(format!("wrote {}", decision.resolved.display()))
     }
 }
